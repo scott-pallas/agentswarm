@@ -51,7 +51,7 @@ The broker starts automatically when the first MCP server connects.
 
 ```
   ┌──────────────────────────────────┐
-  │      BROKER (localhost:7899)     │
+  │      BROKER (localhost:7900)     │
   │  SQLite │ HTTP API │ SSE Push    │
   └────┬─────────────────────┬───────┘
        │                     │
@@ -93,7 +93,7 @@ agentswarm kill-broker         # Stop broker
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `AGENTSWARM_PORT` | `7899` | Broker port |
+| `AGENTSWARM_PORT` | `7900` | Broker port |
 | `AGENTSWARM_DB` | `~/.agentswarm.db` | Database path |
 | `AGENTSWARM_HEARTBEAT_MS` | `15000` | Heartbeat interval |
 | `AGENTSWARM_STALE_TIMEOUT_MS` | `60000` | Stale peer timeout |

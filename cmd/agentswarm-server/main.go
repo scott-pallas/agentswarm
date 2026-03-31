@@ -13,7 +13,7 @@ import (
 )
 
 func main() {
-	port := envOrDefault("AGENTSWARM_PORT", "7899")
+	port := envOrDefault("AGENTSWARM_PORT", "7900")
 	brokerURL := fmt.Sprintf("http://localhost:%s", port)
 
 	// Auto-launch broker if not running

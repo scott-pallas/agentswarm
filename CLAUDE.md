@@ -6,7 +6,7 @@ agentswarm enables multiple Claude Code sessions to discover each other and comm
 
 ## Architecture
 
-- **Broker** (`cmd/broker/`) — Singleton HTTP+SSE daemon on localhost:7899 with SQLite storage
+- **Broker** (`cmd/broker/`) — Singleton HTTP+SSE daemon on localhost:7900 with SQLite storage
 - **MCP Server** (`cmd/server/`) — One per Claude Code session, stdio transport, connects to broker
 - **CLI** (`cli/`) — Debugging/management utility
 

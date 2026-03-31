@@ -32,7 +32,7 @@ agentswarm enables multiple Claude Code sessions to discover each other and comm
 ```
   ┌────────────────────────────────────────────────┐
   │              BROKER (broker.ts)                  │
-  │              localhost:7899                      │
+  │              localhost:7900                      │
   │                                                  │
   │  ┌──────────┐  ┌──────────┐  ┌──────────────┐  │
   │  │ SQLite   │  │ HTTP API │  │ SSE Streams  │  │
@@ -662,7 +662,7 @@ bun cli.ts kill-broker         # Stop broker daemon
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `AGENTSWARM_PORT` | `7899` | Broker port |
+| `AGENTSWARM_PORT` | `7900` | Broker port |
 | `AGENTSWARM_DB` | `~/.agentswarm.db` | SQLite database path |
 | `AGENTSWARM_HEARTBEAT_MS` | `15000` | Heartbeat interval |
 | `AGENTSWARM_KEEPALIVE_MS` | `15000` | SSE keepalive interval |

@@ -19,7 +19,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	port := envOrDefault("AGENTSWARM_PORT", "7899")
+	port := envOrDefault("AGENTSWARM_PORT", "7900")
 	brokerURL := fmt.Sprintf("http://localhost:%s", port)
 
 	switch os.Args[1] {

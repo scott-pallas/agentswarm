@@ -16,7 +16,7 @@ import (
 )
 
 func main() {
-	port := envOrDefault("AGENTSWARM_PORT", "7899")
+	port := envOrDefault("AGENTSWARM_PORT", "7900")
 	dbPath := os.Getenv("AGENTSWARM_DB") // empty = default (~/.agentswarm.db)
 	staleTimeoutMs, _ := strconv.Atoi(envOrDefault("AGENTSWARM_STALE_TIMEOUT_MS", "60000"))
 
