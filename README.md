@@ -12,16 +12,30 @@ Real-time peer-to-peer communication for Claude Code sessions. Instant delivery,
 - **Broadcast** — Send to all peers in a repo, directory, or machine
 - **Auto-everything** — Broker auto-launches, dead peers auto-clean
 
-## Quick Start
+## Install
+
+### One-liner (recommended)
 
 ```bash
-# Build
-make build
+go install github.com/scott-pallas/agentswarm/cmd/agentswarm-broker@latest
+go install github.com/scott-pallas/agentswarm/cmd/agentswarm-server@latest
+go install github.com/scott-pallas/agentswarm/cmd/agentswarm@latest
+```
 
-# Install to /usr/local/bin
-make install
+Binaries land in `~/go/bin/`. Make sure that's in your `$PATH`.
 
-# Add to Claude Code (per-user)
+### From source
+
+```bash
+git clone https://github.com/scott-pallas/agentswarm.git
+cd agentswarm
+make build    # builds to ./bin/
+make install  # copies to /usr/local/bin/
+```
+
+### Configure Claude Code
+
+```bash
 claude mcp add --scope user --transport stdio agentswarm -- agentswarm-server
 ```
 

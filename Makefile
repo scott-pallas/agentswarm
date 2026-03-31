@@ -4,9 +4,9 @@ BINDIR := bin
 
 build:
 	@mkdir -p $(BINDIR)
-	go build -o $(BINDIR)/agentswarm-broker ./cmd/broker
-	go build -o $(BINDIR)/agentswarm-server ./cmd/server
-	go build -o $(BINDIR)/agentswarm ./cli
+	go build -o $(BINDIR)/agentswarm-broker ./cmd/agentswarm-broker
+	go build -o $(BINDIR)/agentswarm-server ./cmd/agentswarm-server
+	go build -o $(BINDIR)/agentswarm ./cmd/agentswarm
 
 install: build
 	cp $(BINDIR)/agentswarm-broker /usr/local/bin/
