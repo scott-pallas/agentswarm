@@ -464,11 +464,15 @@ func EnsureBroker(brokerURL string) error {
 
 	log.Println("broker not running, starting...")
 	cmd := exec.Command("agentswarm-broker")
-	cmd.Stdout = os.Stderr
+	// CRITICAL: broker must NOT inherit stdout — that's the MCP channel
+	cmd.Stdout = nil
 	cmd.Stderr = os.Stderr
+	cmd.Stdin = nil
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start broker: %w", err)
 	}
+	// Detach so broker survives if server exits
+	cmd.Process.Release()
 
 	// Wait for broker to be ready
 	for i := 0; i < 20; i++ {

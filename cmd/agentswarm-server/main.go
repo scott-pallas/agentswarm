@@ -13,6 +13,9 @@ import (
 )
 
 func main() {
+	// Ensure all logging goes to stderr (stdout is the MCP channel)
+	log.SetOutput(os.Stderr)
+
 	port := envOrDefault("AGENTSWARM_PORT", "7900")
 	brokerURL := fmt.Sprintf("http://localhost:%s", port)
 
