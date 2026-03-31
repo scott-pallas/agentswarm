@@ -12,6 +12,12 @@ Real-time peer-to-peer communication for Claude Code sessions. Instant delivery,
 - **Broadcast** — Send to all peers in a repo, directory, or machine
 - **Auto-everything** — Broker auto-launches, dead peers auto-clean
 
+## Requirements
+
+- **Go 1.22+** — [install Go](https://go.dev/dl/)
+- **Claude Code v2.1.80+** — channels support required
+- **claude.ai login** — channels require web auth (API key won't work)
+
 ## Install
 
 ### One-liner (recommended)
