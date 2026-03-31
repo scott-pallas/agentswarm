@@ -1,0 +1,6 @@
+{
+  "agentswarm": {
+    "command": "agentswarm-server",
+    "args": []
+  }
+}
