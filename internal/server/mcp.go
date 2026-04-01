@@ -6,25 +6,26 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
-	"os/exec"
-	"path/filepath"
 	"strconv"
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
+	"github.com/scott-pallas/agentswarm/internal/broker"
 	"github.com/scott-pallas/agentswarm/internal/types"
 )
 
 // MCPServer wraps the MCP stdio server and broker communication.
 type MCPServer struct {
-	brokerURL string
-	peerID    string
-	peerCtx   *PeerContext
-	mcpSrv    *mcpserver.MCPServer
-	sseClient *SSEClient
+	brokerURL  string
+	peerID     string
+	peerCtx    *PeerContext
+	mcpSrv     *mcpserver.MCPServer
+	sseClient  *SSEClient
+	httpServer *http.Server // non-nil if this instance is the broker
 }
 
 // NewMCPServer creates and configures the MCP server with all tools.
@@ -33,9 +34,6 @@ func NewMCPServer(brokerURL string) *MCPServer {
 		brokerURL: brokerURL,
 	}
 
-	// Hook to inject experimental capabilities (claude/channel) into the
-	// initialize response. mcp-go doesn't expose this natively, but the
-	// AfterInitialize hook lets us mutate the result before it's sent.
 	hooks := &mcpserver.Hooks{}
 	hooks.AddAfterInitialize(func(ctx context.Context, id any, msg *mcp.InitializeRequest, result *mcp.InitializeResult) {
 		if result.Capabilities.Experimental == nil {
@@ -69,7 +67,6 @@ RULES:
 }
 
 func (s *MCPServer) registerTools() {
-	// list_peers
 	s.mcpSrv.AddTool(mcp.Tool{
 		Name:        "list_peers",
 		Description: "Discover other Claude Code instances. Shows what they're working on and what files they're editing.",
@@ -86,41 +83,35 @@ func (s *MCPServer) registerTools() {
 		},
 	}, s.handleListPeers)
 
-	// send_message
 	s.mcpSrv.AddTool(mcp.Tool{
 		Name:        "send_message",
 		Description: "Send a message to another Claude Code instance. Arrives instantly.",
 		InputSchema: mcp.ToolInputSchema{
 			Type: "object",
 			Properties: map[string]interface{}{
-				"to_id":     map[string]interface{}{"type": "string", "description": "Target peer ID"},
-				"text":      map[string]interface{}{"type": "string", "description": "Message content"},
-				"type":      map[string]interface{}{"type": "string", "enum": []string{"message", "question", "request", "alert", "notification"}, "description": "Message type"},
-				"urgency":   map[string]interface{}{"type": "string", "enum": []string{"low", "normal", "high"}, "description": "Message urgency"},
-				"thread_id": map[string]interface{}{"type": "string", "description": "Thread ID for ongoing conversations (optional)"},
-				"files":     map[string]interface{}{"type": "array", "description": "Relevant file paths for context (optional)"},
+				"to_id": map[string]interface{}{"type": "string", "description": "Target peer ID"},
+				"text":  map[string]interface{}{"type": "string", "description": "Message content"},
+				"type":  map[string]interface{}{"type": "string", "enum": []string{"message", "question", "request", "alert", "notification"}, "description": "Message type"},
+				"files": map[string]interface{}{"type": "array", "description": "Relevant file paths for context (optional)"},
 			},
 			Required: []string{"to_id", "text"},
 		},
 	}, s.handleSendMessage)
 
-	// broadcast
 	s.mcpSrv.AddTool(mcp.Tool{
 		Name:        "broadcast",
 		Description: "Send a message to all peers in a scope (repo, directory, or machine).",
 		InputSchema: mcp.ToolInputSchema{
 			Type: "object",
 			Properties: map[string]interface{}{
-				"text":    map[string]interface{}{"type": "string", "description": "Message content"},
-				"scope":   map[string]interface{}{"type": "string", "enum": []string{"machine", "directory", "repo"}, "description": "Broadcast scope"},
-				"type":    map[string]interface{}{"type": "string", "enum": []string{"message", "alert", "notification"}, "description": "Message type"},
-				"urgency": map[string]interface{}{"type": "string", "enum": []string{"low", "normal", "high"}, "description": "Message urgency"},
+				"text":  map[string]interface{}{"type": "string", "description": "Message content"},
+				"scope": map[string]interface{}{"type": "string", "enum": []string{"machine", "directory", "repo"}, "description": "Broadcast scope"},
+				"type":  map[string]interface{}{"type": "string", "enum": []string{"message", "alert", "notification"}, "description": "Message type"},
 			},
 			Required: []string{"text", "scope"},
 		},
 	}, s.handleBroadcast)
 
-	// set_summary
 	s.mcpSrv.AddTool(mcp.Tool{
 		Name:        "set_summary",
 		Description: "Describe what you're working on (visible to other peers).",
@@ -133,7 +124,27 @@ func (s *MCPServer) registerTools() {
 		},
 	}, s.handleSetSummary)
 
-	// get_context
+	s.mcpSrv.AddTool(mcp.Tool{
+		Name:        "set_name",
+		Description: "Set a human-readable name for this peer (visible to other peers).",
+		InputSchema: mcp.ToolInputSchema{
+			Type: "object",
+			Properties: map[string]interface{}{
+				"name": map[string]interface{}{"type": "string", "description": "Display name for this peer"},
+			},
+			Required: []string{"name"},
+		},
+	}, s.handleSetName)
+
+	s.mcpSrv.AddTool(mcp.Tool{
+		Name:        "whoami",
+		Description: "Returns your own peer ID, name, and registration info.",
+		InputSchema: mcp.ToolInputSchema{
+			Type:       "object",
+			Properties: map[string]interface{}{},
+		},
+	}, s.handleWhoAmI)
+
 	s.mcpSrv.AddTool(mcp.Tool{
 		Name:        "get_context",
 		Description: "Read a shared context value set by any peer in the same scope.",
@@ -146,7 +157,6 @@ func (s *MCPServer) registerTools() {
 		},
 	}, s.handleGetContext)
 
-	// set_context
 	s.mcpSrv.AddTool(mcp.Tool{
 		Name:        "set_context",
 		Description: "Set a shared context value visible to all peers in the same repo/directory.",
@@ -160,7 +170,6 @@ func (s *MCPServer) registerTools() {
 		},
 	}, s.handleSetContext)
 
-	// check_messages
 	s.mcpSrv.AddTool(mcp.Tool{
 		Name:        "check_messages",
 		Description: "Manually check for messages. Normally messages arrive automatically via push — use this as a fallback.",
@@ -169,28 +178,95 @@ func (s *MCPServer) registerTools() {
 			Properties: map[string]interface{}{},
 		},
 	}, s.handleCheckMessages)
+
+	s.mcpSrv.AddTool(mcp.Tool{
+		Name:        "spawn_agent",
+		Description: "Launch a new Claude Code agent that joins the swarm. Fire-and-forget: returns immediately with the PID.",
+		InputSchema: mcp.ToolInputSchema{
+			Type: "object",
+			Properties: map[string]interface{}{
+				"prompt": map[string]interface{}{"type": "string", "description": "The task/instruction for the new agent"},
+				"cwd":    map[string]interface{}{"type": "string", "description": "Working directory for the agent (defaults to current peer's cwd)"},
+				"name":   map[string]interface{}{"type": "string", "description": "Display name for the spawned agent"},
+			},
+			Required: []string{"prompt"},
+		},
+	}, s.handleSpawnAgent)
 }
 
-// Start registers with the broker, opens SSE, and runs the MCP stdio server.
+// Start launches the MCP stdio server immediately, then connects to the
+// broker in the background.
 func (s *MCPServer) Start(ctx context.Context) error {
+	go s.connectToBroker(ctx)
+
+	stdio := mcpserver.NewStdioServer(s.mcpSrv)
+	return stdio.Listen(ctx, os.Stdin, os.Stdout)
+}
+
+// connectToBroker tries to connect to an existing broker, or becomes the broker.
+func (s *MCPServer) connectToBroker(ctx context.Context) {
+	if err := s.ensureBroker(); err != nil {
+		log.Printf("broker unavailable: %v", err)
+		return
+	}
+
 	s.peerCtx = DetectContext()
 
-	// Register with broker
 	if err := s.register(); err != nil {
-		return fmt.Errorf("register with broker: %w", err)
+		log.Printf("failed to register with broker: %v", err)
+		return
 	}
 	log.Printf("registered as peer %s", s.peerID)
 
-	// Start SSE client
 	s.sseClient = NewSSEClient(s.brokerURL, s.peerID, s.handleSSEEvent)
 	s.sseClient.Start()
 
-	// Start heartbeat
 	go s.heartbeatLoop(ctx)
+}
 
-	// Run MCP stdio server
-	stdio := mcpserver.NewStdioServer(s.mcpSrv)
-	return stdio.Listen(ctx, os.Stdin, os.Stdout)
+// ensureBroker checks if a broker is running. If not, starts one in-process.
+func (s *MCPServer) ensureBroker() error {
+	// Check if broker already exists
+	resp, err := http.Get(s.brokerURL + "/health")
+	if err == nil {
+		resp.Body.Close()
+		if resp.StatusCode == 200 {
+			return nil
+		}
+	}
+
+	log.Println("no broker found, starting in-process...")
+
+	// Try to bind the port — if it fails, another instance beat us to it
+	ln, err := net.Listen("tcp", ":7900")
+	if err != nil {
+		// Port taken — another instance just became the broker, wait for it
+		log.Printf("port 7900 taken, connecting as client...")
+		for i := 0; i < 20; i++ {
+			time.Sleep(250 * time.Millisecond)
+			resp, err := http.Get(s.brokerURL + "/health")
+			if err == nil {
+				resp.Body.Close()
+				if resp.StatusCode == 200 {
+					return nil
+				}
+			}
+		}
+		return fmt.Errorf("broker did not start in time")
+	}
+
+	b := broker.New()
+	b.StartCleaner(30*time.Second, 60*time.Second)
+
+	s.httpServer = &http.Server{Handler: b.Handler()}
+	go func() {
+		if err := s.httpServer.Serve(ln); err != nil && err != http.ErrServerClosed {
+			log.Printf("broker HTTP error: %v", err)
+		}
+	}()
+
+	log.Println("in-process broker started on :7900")
+	return nil
 }
 
 // Shutdown cleans up broker registration and SSE.
@@ -200,6 +276,9 @@ func (s *MCPServer) Shutdown() {
 	}
 	if s.peerID != "" {
 		s.brokerPost("/unregister", types.UnregisterRequest{ID: s.peerID}, nil)
+	}
+	if s.httpServer != nil {
+		s.httpServer.Close()
 	}
 }
 
@@ -241,8 +320,10 @@ func (s *MCPServer) heartbeatLoop(ctx context.Context) {
 }
 
 func (s *MCPServer) handleSSEEvent(event, data string) {
-	// Push as channel notification to Claude Code
+	log.Printf("SSE event received: event=%s data=%s", event, data)
 	var content string
+	var meta map[string]interface{}
+
 	switch event {
 	case "message", "broadcast":
 		var msg types.Message
@@ -250,12 +331,23 @@ func (s *MCPServer) handleSSEEvent(event, data string) {
 			return
 		}
 		content = fmt.Sprintf("[%s from %s] %s", msg.Type, msg.FromID, msg.Text)
-	case "conflict":
-		var alert types.ConflictAlert
-		if err := json.Unmarshal([]byte(data), &alert); err != nil {
-			return
+		meta = map[string]interface{}{
+			"from_id": msg.FromID,
 		}
-		content = fmt.Sprintf("⚠️ FILE CONFLICT: peers %v are editing the same files: %v", alert.Peers, alert.Files)
+		// Best-effort peer enrichment with a short timeout to avoid blocking.
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			if peer, err := s.lookupPeer(msg.FromID); err == nil {
+				meta["from_summary"] = peer.Summary
+				meta["from_cwd"] = peer.CWD
+			}
+		}()
+		select {
+		case <-done:
+		case <-time.After(500 * time.Millisecond):
+			log.Printf("lookupPeer timed out for %s, skipping enrichment", msg.FromID)
+		}
 	case "peer_joined":
 		var pj types.PeerJoined
 		if err := json.Unmarshal([]byte(data), &pj); err != nil {
@@ -274,11 +366,13 @@ func (s *MCPServer) handleSSEEvent(event, data string) {
 		content = fmt.Sprintf("[%s] %s", event, data)
 	}
 
-	// Send as channel notification via MCP
-	s.mcpSrv.SendNotificationToAllClients("notifications/claude/channel", map[string]interface{}{
-		"channel": "agentswarm",
-		"body":    content,
-	})
+	params := map[string]interface{}{
+		"content": content,
+	}
+	if meta != nil {
+		params["meta"] = meta
+	}
+	s.mcpSrv.SendNotificationToAllClients("notifications/claude/channel", params)
 }
 
 // --- Tool handlers ---
@@ -310,26 +404,18 @@ func (s *MCPServer) handleSendMessage(ctx context.Context, req mcp.CallToolReque
 	toID, _ := args["to_id"].(string)
 	text, _ := args["text"].(string)
 	msgType, _ := args["type"].(string)
-	urgency, _ := args["urgency"].(string)
-	threadID, _ := args["thread_id"].(string)
 
 	if msgType == "" {
 		msgType = "message"
 	}
-	if urgency == "" {
-		urgency = "normal"
-	}
 
 	brokerReq := types.SendRequest{
-		FromID:   s.peerID,
-		ToID:     toID,
-		Type:     types.MessageType(msgType),
-		Text:     text,
-		Urgency:  types.Urgency(urgency),
-		ThreadID: threadID,
+		FromID: s.peerID,
+		ToID:   toID,
+		Type:   types.MessageType(msgType),
+		Text:   text,
 	}
 
-	// Handle files context
 	if files, ok := args["files"]; ok {
 		if fileList, ok := files.([]interface{}); ok {
 			mc := types.MessageContext{}
@@ -355,13 +441,9 @@ func (s *MCPServer) handleBroadcast(ctx context.Context, req mcp.CallToolRequest
 	text, _ := args["text"].(string)
 	scope, _ := args["scope"].(string)
 	msgType, _ := args["type"].(string)
-	urgency, _ := args["urgency"].(string)
 
 	if msgType == "" {
 		msgType = "notification"
-	}
-	if urgency == "" {
-		urgency = "normal"
 	}
 
 	brokerReq := types.BroadcastRequest{
@@ -369,7 +451,6 @@ func (s *MCPServer) handleBroadcast(ctx context.Context, req mcp.CallToolRequest
 		Scope:   scope,
 		Type:    types.MessageType(msgType),
 		Text:    text,
-		Urgency: types.Urgency(urgency),
 		CWD:     s.peerCtx.CWD,
 		GitRoot: s.peerCtx.GitRoot,
 	}
@@ -392,6 +473,28 @@ func (s *MCPServer) handleSetSummary(ctx context.Context, req mcp.CallToolReques
 	}
 
 	return mcp.NewToolResultText("Summary updated"), nil
+}
+
+func (s *MCPServer) handleSetName(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	name, _ := req.Params.Arguments["name"].(string)
+	if err := s.brokerPost("/set-name", types.SetNameRequest{
+		ID: s.peerID, Name: name,
+	}, nil); err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	return mcp.NewToolResultText(fmt.Sprintf("Name set to '%s'", name)), nil
+}
+
+func (s *MCPServer) handleWhoAmI(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	if s.peerID == "" {
+		return mcp.NewToolResultText("Not yet registered with broker (still connecting)"), nil
+	}
+	peer, err := s.lookupPeer(s.peerID)
+	if err != nil {
+		return mcp.NewToolResultText(fmt.Sprintf("Peer ID: %s (broker lookup failed: %v)", s.peerID, err)), nil
+	}
+	data, _ := json.MarshalIndent(peer, "", "  ")
+	return mcp.NewToolResultText(string(data)), nil
 }
 
 func (s *MCPServer) handleGetContext(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -437,11 +540,47 @@ func (s *MCPServer) handleSetContext(ctx context.Context, req mcp.CallToolReques
 }
 
 func (s *MCPServer) handleCheckMessages(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	// Messages are normally pushed via SSE — this is a manual fallback
 	return mcp.NewToolResultText("Messages are delivered automatically via SSE push. If you haven't received any, there are no pending messages."), nil
 }
 
+func (s *MCPServer) handleSpawnAgent(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	args := req.Params.Arguments
+	prompt, _ := args["prompt"].(string)
+	cwd, _ := args["cwd"].(string)
+	name, _ := args["name"].(string)
+
+	if cwd == "" {
+		cwd = s.peerCtx.CWD
+	}
+
+	augmented := buildSpawnPrompt(prompt, s.peerID, name)
+
+	pid, err := spawnClaude(augmented, cwd)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+
+	return mcp.NewToolResultText(fmt.Sprintf(
+		"Agent spawned (pid: %d). It will appear in list_peers once it connects to the swarm.",
+		pid,
+	)), nil
+}
+
 // --- HTTP helpers ---
+
+func (s *MCPServer) lookupPeer(peerID string) (*types.Peer, error) {
+	var peers []types.Peer
+	err := s.brokerPost("/list-peers", types.ListPeersRequest{Scope: "machine"}, &peers)
+	if err != nil {
+		return nil, err
+	}
+	for i := range peers {
+		if peers[i].ID == peerID {
+			return &peers[i], nil
+		}
+	}
+	return nil, fmt.Errorf("peer not found: %s", peerID)
+}
 
 func (s *MCPServer) brokerPost(path string, body interface{}, result interface{}) error {
 	data, err := json.Marshal(body)
@@ -463,112 +602,6 @@ func (s *MCPServer) brokerPost(path string, body interface{}, result interface{}
 		return json.NewDecoder(resp.Body).Decode(result)
 	}
 	return nil
-}
-
-// EnsureBroker checks if the broker is running and starts it if not.
-func EnsureBroker(brokerURL string) error {
-	resp, err := http.Get(brokerURL + "/health")
-	if err == nil {
-		resp.Body.Close()
-		if resp.StatusCode == 200 {
-			return nil // already running
-		}
-	}
-
-	log.Println("broker not running, starting...")
-
-	// Find the broker binary. Claude Code may not have ~/go/bin in PATH,
-	// so we look relative to our own executable first.
-	brokerBin := findBrokerBinary()
-	log.Printf("using broker binary: %s", brokerBin)
-
-	cmd := exec.Command(brokerBin)
-	// CRITICAL: broker must NOT inherit stdout — that's the MCP channel
-	cmd.Stdout = nil
-	cmd.Stderr = os.Stderr
-	cmd.Stdin = nil
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("start broker: %w", err)
-	}
-	// Detach so broker survives if server exits
-	cmd.Process.Release()
-
-	// Wait for broker to be ready
-	for i := 0; i < 20; i++ {
-		time.Sleep(250 * time.Millisecond)
-		resp, err := http.Get(brokerURL + "/health")
-		if err == nil {
-			resp.Body.Close()
-			if resp.StatusCode == 200 {
-				log.Println("broker started")
-				return nil
-			}
-		}
-	}
-	return fmt.Errorf("broker did not start in time")
-}
-
-// findBrokerBinary locates the agentswarm-broker binary.
-// Order: 1) same directory as current executable, 2) resolved symlink path, 3) PATH lookup, 4) common Go install dirs.
-func findBrokerBinary() string {
-	// 1. Same directory as current executable (most reliable for go install)
-	if exe, err := os.Executable(); err == nil {
-		dir := filepath.Dir(exe)
-		candidate := filepath.Join(dir, "agentswarm-broker")
-		log.Printf("findBrokerBinary: checking sibling of %s → %s", exe, candidate)
-		if _, err := os.Stat(candidate); err == nil {
-			return candidate
-		}
-
-		// 1b. Resolve symlinks — os.Executable() might return a symlink
-		if resolved, err := filepath.EvalSymlinks(exe); err == nil && resolved != exe {
-			dir = filepath.Dir(resolved)
-			candidate = filepath.Join(dir, "agentswarm-broker")
-			log.Printf("findBrokerBinary: checking resolved symlink %s → %s", resolved, candidate)
-			if _, err := os.Stat(candidate); err == nil {
-				return candidate
-			}
-		}
-	}
-
-	// 2. Standard PATH lookup
-	if path, err := exec.LookPath("agentswarm-broker"); err == nil {
-		log.Printf("findBrokerBinary: found in PATH → %s", path)
-		return path
-	}
-	log.Printf("findBrokerBinary: not in PATH")
-
-	// 3. Common Go install locations
-	if home, err := os.UserHomeDir(); err == nil {
-		for _, gobin := range []string{
-			filepath.Join(home, "go", "bin", "agentswarm-broker"),
-			filepath.Join(home, ".go", "bin", "agentswarm-broker"),
-		} {
-			log.Printf("findBrokerBinary: checking %s", gobin)
-			if _, err := os.Stat(gobin); err == nil {
-				return gobin
-			}
-		}
-		// Also check GOPATH/bin and GOBIN
-		if gopath := os.Getenv("GOPATH"); gopath != "" {
-			candidate := filepath.Join(gopath, "bin", "agentswarm-broker")
-			log.Printf("findBrokerBinary: checking GOPATH %s", candidate)
-			if _, err := os.Stat(candidate); err == nil {
-				return candidate
-			}
-		}
-		if gobin := os.Getenv("GOBIN"); gobin != "" {
-			candidate := filepath.Join(gobin, "agentswarm-broker")
-			log.Printf("findBrokerBinary: checking GOBIN %s", candidate)
-			if _, err := os.Stat(candidate); err == nil {
-				return candidate
-			}
-		}
-	}
-
-	// Fallback — hope it's in PATH at runtime
-	log.Printf("findBrokerBinary: ALL lookups failed, falling back to bare 'agentswarm-broker'")
-	return "agentswarm-broker"
 }
 
 func envOrDefault(key, def string) string {
