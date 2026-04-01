@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"time"
 
@@ -32,9 +33,21 @@ func NewMCPServer(brokerURL string) *MCPServer {
 		brokerURL: brokerURL,
 	}
 
+	// Hook to inject experimental capabilities (claude/channel) into the
+	// initialize response. mcp-go doesn't expose this natively, but the
+	// AfterInitialize hook lets us mutate the result before it's sent.
+	hooks := &mcpserver.Hooks{}
+	hooks.AddAfterInitialize(func(ctx context.Context, id any, msg *mcp.InitializeRequest, result *mcp.InitializeResult) {
+		if result.Capabilities.Experimental == nil {
+			result.Capabilities.Experimental = make(map[string]interface{})
+		}
+		result.Capabilities.Experimental["claude/channel"] = map[string]interface{}{}
+	})
+
 	s.mcpSrv = mcpserver.NewMCPServer(
 		"agentswarm",
 		"0.1.0",
+		mcpserver.WithHooks(hooks),
 		mcpserver.WithInstructions(`You are connected to agentswarm. Other Claude Code instances can see you and message you.
 
 RULES:
@@ -463,7 +476,13 @@ func EnsureBroker(brokerURL string) error {
 	}
 
 	log.Println("broker not running, starting...")
-	cmd := exec.Command("agentswarm-broker")
+
+	// Find the broker binary. Claude Code may not have ~/go/bin in PATH,
+	// so we look relative to our own executable first.
+	brokerBin := findBrokerBinary()
+	log.Printf("using broker binary: %s", brokerBin)
+
+	cmd := exec.Command(brokerBin)
 	// CRITICAL: broker must NOT inherit stdout — that's the MCP channel
 	cmd.Stdout = nil
 	cmd.Stderr = os.Stderr
@@ -487,6 +506,52 @@ func EnsureBroker(brokerURL string) error {
 		}
 	}
 	return fmt.Errorf("broker did not start in time")
+}
+
+// findBrokerBinary locates the agentswarm-broker binary.
+// Order: 1) same directory as current executable, 2) PATH lookup, 3) common Go install dirs.
+func findBrokerBinary() string {
+	// 1. Same directory as current executable (most reliable)
+	if exe, err := os.Executable(); err == nil {
+		dir := filepath.Dir(exe)
+		candidate := filepath.Join(dir, "agentswarm-broker")
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+	}
+
+	// 2. Standard PATH lookup
+	if path, err := exec.LookPath("agentswarm-broker"); err == nil {
+		return path
+	}
+
+	// 3. Common Go install locations
+	if home, err := os.UserHomeDir(); err == nil {
+		for _, gobin := range []string{
+			filepath.Join(home, "go", "bin", "agentswarm-broker"),
+			filepath.Join(home, ".go", "bin", "agentswarm-broker"),
+		} {
+			if _, err := os.Stat(gobin); err == nil {
+				return gobin
+			}
+		}
+		// Also check GOPATH/bin and GOBIN
+		if gopath := os.Getenv("GOPATH"); gopath != "" {
+			candidate := filepath.Join(gopath, "bin", "agentswarm-broker")
+			if _, err := os.Stat(candidate); err == nil {
+				return candidate
+			}
+		}
+		if gobin := os.Getenv("GOBIN"); gobin != "" {
+			candidate := filepath.Join(gobin, "agentswarm-broker")
+			if _, err := os.Stat(candidate); err == nil {
+				return candidate
+			}
+		}
+	}
+
+	// Fallback — hope it's in PATH at runtime
+	return "agentswarm-broker"
 }
 
 func envOrDefault(key, def string) string {
