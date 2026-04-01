@@ -509,21 +509,34 @@ func EnsureBroker(brokerURL string) error {
 }
 
 // findBrokerBinary locates the agentswarm-broker binary.
-// Order: 1) same directory as current executable, 2) PATH lookup, 3) common Go install dirs.
+// Order: 1) same directory as current executable, 2) resolved symlink path, 3) PATH lookup, 4) common Go install dirs.
 func findBrokerBinary() string {
-	// 1. Same directory as current executable (most reliable)
+	// 1. Same directory as current executable (most reliable for go install)
 	if exe, err := os.Executable(); err == nil {
 		dir := filepath.Dir(exe)
 		candidate := filepath.Join(dir, "agentswarm-broker")
+		log.Printf("findBrokerBinary: checking sibling of %s → %s", exe, candidate)
 		if _, err := os.Stat(candidate); err == nil {
 			return candidate
+		}
+
+		// 1b. Resolve symlinks — os.Executable() might return a symlink
+		if resolved, err := filepath.EvalSymlinks(exe); err == nil && resolved != exe {
+			dir = filepath.Dir(resolved)
+			candidate = filepath.Join(dir, "agentswarm-broker")
+			log.Printf("findBrokerBinary: checking resolved symlink %s → %s", resolved, candidate)
+			if _, err := os.Stat(candidate); err == nil {
+				return candidate
+			}
 		}
 	}
 
 	// 2. Standard PATH lookup
 	if path, err := exec.LookPath("agentswarm-broker"); err == nil {
+		log.Printf("findBrokerBinary: found in PATH → %s", path)
 		return path
 	}
+	log.Printf("findBrokerBinary: not in PATH")
 
 	// 3. Common Go install locations
 	if home, err := os.UserHomeDir(); err == nil {
@@ -531,6 +544,7 @@ func findBrokerBinary() string {
 			filepath.Join(home, "go", "bin", "agentswarm-broker"),
 			filepath.Join(home, ".go", "bin", "agentswarm-broker"),
 		} {
+			log.Printf("findBrokerBinary: checking %s", gobin)
 			if _, err := os.Stat(gobin); err == nil {
 				return gobin
 			}
@@ -538,12 +552,14 @@ func findBrokerBinary() string {
 		// Also check GOPATH/bin and GOBIN
 		if gopath := os.Getenv("GOPATH"); gopath != "" {
 			candidate := filepath.Join(gopath, "bin", "agentswarm-broker")
+			log.Printf("findBrokerBinary: checking GOPATH %s", candidate)
 			if _, err := os.Stat(candidate); err == nil {
 				return candidate
 			}
 		}
 		if gobin := os.Getenv("GOBIN"); gobin != "" {
 			candidate := filepath.Join(gobin, "agentswarm-broker")
+			log.Printf("findBrokerBinary: checking GOBIN %s", candidate)
 			if _, err := os.Stat(candidate); err == nil {
 				return candidate
 			}
@@ -551,6 +567,7 @@ func findBrokerBinary() string {
 	}
 
 	// Fallback — hope it's in PATH at runtime
+	log.Printf("findBrokerBinary: ALL lookups failed, falling back to bare 'agentswarm-broker'")
 	return "agentswarm-broker"
 }
 
