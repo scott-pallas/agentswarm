@@ -1,6 +1,10 @@
 package server
 
-import "fmt"
+import (
+	"fmt"
+	"os/exec"
+	"syscall"
+)
 
 // buildSpawnPrompt wraps a user prompt with swarm context for a spawned agent.
 func buildSpawnPrompt(userPrompt, parentPeerID, name string) string {
@@ -13,4 +17,32 @@ func buildSpawnPrompt(userPrompt, parentPeerID, name string) string {
 		parentPeerID, userPrompt,
 	)
 	return prompt
+}
+
+// spawnClaude launches a detached claude process with the given prompt and working directory.
+// Returns the process PID.
+func spawnClaude(prompt, cwd string) (int, error) {
+	cmd := exec.Command(
+		"claude",
+		"--dangerously-skip-permissions",
+		"--dangerously-load-development-channels",
+		"server:agentspawn",
+		"-p", prompt,
+	)
+	cmd.Dir = cwd
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Setpgid: true,
+	}
+	// Discard stdout/stderr — the spawned agent communicates via the swarm
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+
+	if err := cmd.Start(); err != nil {
+		return 0, fmt.Errorf("failed to spawn claude: %w", err)
+	}
+
+	// Detach — don't wait for the process
+	go cmd.Wait()
+
+	return cmd.Process.Pid, nil
 }
