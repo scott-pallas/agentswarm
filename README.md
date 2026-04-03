@@ -110,6 +110,41 @@ Orchestrator                    Worker (spawned automatically)
 
 For tasks assigned to existing peers rather than new agents, use `request_task` and `report_result`.
 
+### Fan-out / Fan-in
+
+Delegate multiple tasks in parallel and collect all results:
+
+```
+delegate("review auth module")    → task_id_1
+delegate("review payments module") → task_id_2
+delegate("review API module")      → task_id_3
+
+wait_for_result([task_id_1, task_id_2, task_id_3], mode="all")
+→ returns all 3 results when complete
+```
+
+Use `mode="any"` to return as soon as the first task finishes, then `cancel_task` on the rest.
+
+### Persistent Agents (Monitoring / Polling)
+
+Spawn an interactive agent that stays alive and polls on an interval using `wait_for_messages` as a heartbeat:
+
+```
+spawn_agent(
+  mode: "interactive",
+  prompt: "You are a PR monitor. Your loop:
+    1. Check for open PRs with gh pr list
+    2. Send results to your parent peer
+    3. Call wait_for_messages(timeout_seconds: 30)
+    4. On timeout, go back to step 1
+    5. If you receive 'stop', exit"
+)
+```
+
+The agent uses `wait_for_messages` with a timeout as its polling interval. When the timeout expires (no messages received), it runs its check and loops. When it receives a message, it can respond or stop.
+
+This pattern works for any recurring task: monitoring PRs, watching CI status, polling deploy health, or periodic test runs.
+
 ## Environment Variables
 
 | Variable | Default | Description |
