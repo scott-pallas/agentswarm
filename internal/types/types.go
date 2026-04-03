@@ -185,3 +185,67 @@ type ContextListResponse struct {
 type OKResponse struct {
 	OK bool `json:"ok"`
 }
+
+// --- Task / Orchestration types ---
+
+// Task represents a delegated task tracked by the broker.
+type Task struct {
+	TaskID      string `json:"task_id"`
+	ParentID    string `json:"parent_id"`
+	ChildID     string `json:"child_id,omitempty"`
+	Prompt      string `json:"prompt"`
+	Status      string `json:"status"` // pending, completed, failed, cancelled
+	Result      string `json:"result,omitempty"`
+	CreatedAt   string `json:"created_at"`
+	CompletedAt string `json:"completed_at,omitempty"`
+}
+
+// TaskResult is returned by wait_for_result.
+type TaskResult struct {
+	TaskID      string `json:"task_id"`
+	Status      string `json:"status"`
+	Result      string `json:"result,omitempty"`
+	PeerID      string `json:"peer_id,omitempty"`
+	CompletedAt string `json:"completed_at,omitempty"`
+}
+
+type TaskCreateRequest struct {
+	ParentID string `json:"parent_id"`
+	ChildID  string `json:"child_id,omitempty"`
+	Prompt   string `json:"prompt"`
+}
+
+type TaskCreateResponse struct {
+	TaskID string `json:"task_id"`
+}
+
+type TaskUpdateRequest struct {
+	TaskID  string `json:"task_id"`
+	ChildID string `json:"child_id,omitempty"`
+	Status  string `json:"status"`
+	Result  string `json:"result,omitempty"`
+}
+
+type TaskWaitRequest struct {
+	TaskIDs        []string `json:"task_ids"`
+	Mode           string   `json:"mode,omitempty"` // "any" or "all", default "all"
+	TimeoutSeconds int      `json:"timeout_seconds,omitempty"`
+}
+
+type TaskWaitResponse struct {
+	Results  []TaskResult `json:"results"`
+	TimedOut bool         `json:"timed_out"`
+}
+
+type TaskListRequest struct {
+	ParentID string   `json:"parent_id,omitempty"`
+	TaskIDs  []string `json:"task_ids,omitempty"`
+}
+
+type TaskListResponse struct {
+	Tasks []Task `json:"tasks"`
+}
+
+type TaskCancelRequest struct {
+	TaskID string `json:"task_id"`
+}
