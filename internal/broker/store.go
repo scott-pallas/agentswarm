@@ -1,6 +1,8 @@
 package broker
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"sync"
@@ -11,18 +13,22 @@ import (
 
 // Store is an in-memory data store replacing SQLite.
 type Store struct {
-	mu        sync.RWMutex
-	peers     map[string]*types.Peer
-	messages  []types.Message
-	nextMsgID int64
-	context   map[string]*types.ContextEntry // key: "scopeType\x00scopeValue\x00key"
+	mu          sync.RWMutex
+	peers       map[string]*types.Peer
+	messages    []types.Message
+	nextMsgID   int64
+	context     map[string]*types.ContextEntry // key: "scopeType\x00scopeValue\x00key"
+	tasks       map[string]*types.Task
+	taskWaiters map[string][]chan struct{}
 }
 
 func NewStore() *Store {
 	return &Store{
-		peers:     make(map[string]*types.Peer),
-		nextMsgID: 1,
-		context:   make(map[string]*types.ContextEntry),
+		peers:       make(map[string]*types.Peer),
+		nextMsgID:   1,
+		context:     make(map[string]*types.ContextEntry),
+		tasks:       make(map[string]*types.Task),
+		taskWaiters: make(map[string][]chan struct{}),
 	}
 }
 
@@ -205,4 +211,189 @@ func (s *Store) ListContext(scopeType, scopeValue string) []types.ContextEntry {
 func isProcessAlive(proc *os.Process) bool {
 	err := proc.Signal(os.Signal(nil))
 	return err == nil
+}
+
+// --- Task operations ---
+
+const maxResultSize = 64 * 1024 // 64KB
+
+func (s *Store) CreateTask(parentID, childID, prompt string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	id := generateStoreID()
+	s.tasks[id] = &types.Task{
+		TaskID:    id,
+		ParentID:  parentID,
+		ChildID:   childID,
+		Prompt:    prompt,
+		Status:    "pending",
+		CreatedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+	return id
+}
+
+func (s *Store) GetTask(id string) (*types.Task, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	t, ok := s.tasks[id]
+	if !ok {
+		return nil, false
+	}
+	cp := *t
+	return &cp, true
+}
+
+func (s *Store) UpdateTask(id, childID, status, result string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	t, ok := s.tasks[id]
+	if !ok {
+		return fmt.Errorf("task not found: %s", id)
+	}
+	if childID != "" && t.ChildID == "" {
+		t.ChildID = childID
+	}
+	if len(result) > maxResultSize {
+		result = result[:maxResultSize]
+	}
+	t.Status = status
+	t.Result = result
+	if status == "completed" || status == "failed" || status == "cancelled" {
+		t.CompletedAt = time.Now().UTC().Format(time.RFC3339)
+	}
+	s.notifyWaiters(id)
+	return nil
+}
+
+func (s *Store) CancelTask(id string) error {
+	return s.UpdateTask(id, "", "cancelled", "")
+}
+
+func (s *Store) ListTasks(parentID string, taskIDs []string) []types.Task {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var result []types.Task
+	if len(taskIDs) > 0 {
+		for _, id := range taskIDs {
+			if t, ok := s.tasks[id]; ok {
+				result = append(result, *t)
+			}
+		}
+		return result
+	}
+	for _, t := range s.tasks {
+		if parentID != "" && t.ParentID != parentID {
+			continue
+		}
+		result = append(result, *t)
+	}
+	return result
+}
+
+func (s *Store) FailTasksForPeer(peerID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, t := range s.tasks {
+		if t.ChildID == peerID && t.Status == "pending" {
+			t.Status = "failed"
+			t.Result = "worker process exited unexpectedly"
+			t.CompletedAt = time.Now().UTC().Format(time.RFC3339)
+			s.notifyWaiters(t.TaskID)
+		}
+	}
+}
+
+func (s *Store) WaitForTasks(taskIDs []string, mode string, timeout time.Duration) []types.TaskResult {
+	s.mu.Lock()
+	if s.allTerminal(taskIDs, mode) {
+		results := s.collectResults(taskIDs)
+		s.mu.Unlock()
+		return results
+	}
+
+	ch := make(chan struct{}, 1)
+	for _, id := range taskIDs {
+		s.taskWaiters[id] = append(s.taskWaiters[id], ch)
+	}
+	s.mu.Unlock()
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ch:
+			s.mu.RLock()
+			done := s.allTerminal(taskIDs, mode)
+			s.mu.RUnlock()
+			if done {
+				s.mu.RLock()
+				results := s.collectResults(taskIDs)
+				s.mu.RUnlock()
+				return results
+			}
+		case <-timer.C:
+			s.mu.RLock()
+			results := s.collectResults(taskIDs)
+			s.mu.RUnlock()
+			return results
+		}
+	}
+}
+
+func (s *Store) allTerminal(taskIDs []string, mode string) bool {
+	isTerminal := func(status string) bool {
+		return status == "completed" || status == "failed" || status == "cancelled"
+	}
+	for _, id := range taskIDs {
+		t, ok := s.tasks[id]
+		if !ok {
+			continue
+		}
+		if isTerminal(t.Status) {
+			if mode == "any" {
+				return true
+			}
+		} else {
+			if mode != "any" {
+				return false
+			}
+		}
+	}
+	return mode != "any"
+}
+
+func (s *Store) collectResults(taskIDs []string) []types.TaskResult {
+	var results []types.TaskResult
+	for _, id := range taskIDs {
+		t, ok := s.tasks[id]
+		if !ok {
+			continue
+		}
+		results = append(results, types.TaskResult{
+			TaskID:      t.TaskID,
+			Status:      t.Status,
+			Result:      t.Result,
+			PeerID:      t.ChildID,
+			CompletedAt: t.CompletedAt,
+		})
+	}
+	return results
+}
+
+// notifyWaiters must be called with s.mu held.
+func (s *Store) notifyWaiters(taskID string) {
+	waiters := s.taskWaiters[taskID]
+	for _, ch := range waiters {
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
+	}
+	delete(s.taskWaiters, taskID)
+}
+
+func generateStoreID() string {
+	b := make([]byte, 4)
+	rand.Read(b)
+	return hex.EncodeToString(b)
 }
