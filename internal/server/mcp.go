@@ -336,7 +336,7 @@ func (s *MCPServer) ensureBroker() error {
 	log.Println("no broker found, starting in-process...")
 
 	// Try to bind the port — if it fails, another instance beat us to it
-	ln, err := net.Listen("tcp", ":7900")
+	ln, err := net.Listen("tcp", "127.0.0.1:7900")
 	if err != nil {
 		// Port taken — another instance just became the broker, wait for it
 		log.Printf("port 7900 taken, connecting as client...")
@@ -356,7 +356,12 @@ func (s *MCPServer) ensureBroker() error {
 	b := broker.New()
 	b.StartCleaner(30*time.Second, 60*time.Second)
 
-	s.httpServer = &http.Server{Handler: b.Handler()}
+	s.httpServer = &http.Server{
+		Handler:      b.Handler(),
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 0, // SSE streams need unlimited write time
+		IdleTimeout:  60 * time.Second,
+	}
 	go func() {
 		if err := s.httpServer.Serve(ln); err != nil && err != http.ErrServerClosed {
 			log.Printf("broker HTTP error: %v", err)

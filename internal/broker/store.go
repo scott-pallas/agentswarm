@@ -48,7 +48,11 @@ func (s *Store) GetPeer(id string) (*types.Peer, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	p, ok := s.peers[id]
-	return p, ok
+	if !ok {
+		return nil, false
+	}
+	cp := *p
+	return &cp, true
 }
 
 func (s *Store) SetName(id, name string) {
@@ -136,12 +140,18 @@ func (s *Store) CleanStalePeers(timeout time.Duration) []string {
 	return stale
 }
 
+const maxMessages = 10000
+
 func (s *Store) InsertMessage(m *types.Message) int64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	m.ID = s.nextMsgID
 	s.nextMsgID++
 	s.messages = append(s.messages, *m)
+	// Evict oldest messages when limit exceeded
+	if len(s.messages) > maxMessages {
+		s.messages = s.messages[len(s.messages)-maxMessages:]
+	}
 	return m.ID
 }
 
@@ -190,7 +200,11 @@ func (s *Store) GetContext(key, scopeType, scopeValue string) (*types.ContextEnt
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	e, ok := s.context[contextKey(scopeType, scopeValue, key)]
-	return e, ok
+	if !ok {
+		return nil, false
+	}
+	cp := *e
+	return &cp, true
 }
 
 func (s *Store) ListContext(scopeType, scopeValue string) []types.ContextEntry {
@@ -319,6 +333,7 @@ func (s *Store) WaitForTasks(taskIDs []string, mode string, timeout time.Duratio
 
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
+	defer s.removeWaiter(taskIDs, ch)
 	for {
 		select {
 		case <-ch:
@@ -336,6 +351,24 @@ func (s *Store) WaitForTasks(taskIDs []string, mode string, timeout time.Duratio
 			results := s.collectResults(taskIDs)
 			s.mu.RUnlock()
 			return results
+		}
+	}
+}
+
+// removeWaiter cleans up waiter channel references to prevent leaks on timeout.
+func (s *Store) removeWaiter(taskIDs []string, ch chan struct{}) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, id := range taskIDs {
+		waiters := s.taskWaiters[id]
+		for i, w := range waiters {
+			if w == ch {
+				s.taskWaiters[id] = append(waiters[:i], waiters[i+1:]...)
+				break
+			}
+		}
+		if len(s.taskWaiters[id]) == 0 {
+			delete(s.taskWaiters, id)
 		}
 	}
 }

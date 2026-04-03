@@ -459,7 +459,10 @@ func generateID() string {
 	return hex.EncodeToString(b)
 }
 
+const maxRequestBody = 1 << 20 // 1MB
+
 func readJSON(r *http.Request, w http.ResponseWriter, v interface{}) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
 	if err := json.NewDecoder(r.Body).Decode(v); err != nil {
 		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
 		return false

@@ -4,7 +4,7 @@
 > Instant delivery, structured messaging, zero polling.
 
 **Author:** Scott Pallas
-**Version:** 0.2.0
+**Version:** 0.1.0
 **Date:** 2026-04-01
 **Language:** Go
 **Runtime:** Single binary (no runtime dependencies)

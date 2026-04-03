@@ -2,7 +2,7 @@
   "mcpServers": {
     "agentswarm": {
       "type": "stdio",
-      "command": "/Users/scottpallas/go/bin/agentswarm-server"
+      "command": "agentswarm-server"
     }
   }
 }
