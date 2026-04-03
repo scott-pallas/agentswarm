@@ -49,6 +49,12 @@ func (b *Broker) Handler() http.Handler {
 	mux.HandleFunc("POST /context/get", b.handleContextGet)
 	mux.HandleFunc("POST /context/list", b.handleContextList)
 
+	mux.HandleFunc("POST /task/create", b.handleTaskCreate)
+	mux.HandleFunc("POST /task/update", b.handleTaskUpdate)
+	mux.HandleFunc("POST /task/wait", b.handleTaskWait)
+	mux.HandleFunc("POST /task/list", b.handleTaskList)
+	mux.HandleFunc("POST /task/cancel", b.handleTaskCancel)
+
 	return mux
 }
 
@@ -61,6 +67,7 @@ func (b *Broker) StartCleaner(interval, staleTimeout time.Duration) {
 			stale := b.store.CleanStalePeers(staleTimeout)
 			for _, id := range stale {
 				b.sse.Unsubscribe(id)
+				b.store.FailTasksForPeer(id)
 				b.sse.Broadcast(SSEEvent{
 					Event: "peer_left",
 					Data:  types.PeerLeft{ID: id, Reason: "process_exited"},
@@ -368,6 +375,80 @@ func (b *Broker) handleContextList(w http.ResponseWriter, r *http.Request) {
 		entries = []types.ContextEntry{}
 	}
 	writeJSON(w, types.ContextListResponse{Entries: entries})
+}
+
+// --- Task handlers ---
+
+func (b *Broker) handleTaskCreate(w http.ResponseWriter, r *http.Request) {
+	var req types.TaskCreateRequest
+	if !readJSON(r, w, &req) {
+		return
+	}
+	taskID := b.store.CreateTask(req.ParentID, req.ChildID, req.Prompt)
+	writeJSON(w, types.TaskCreateResponse{TaskID: taskID})
+}
+
+func (b *Broker) handleTaskUpdate(w http.ResponseWriter, r *http.Request) {
+	var req types.TaskUpdateRequest
+	if !readJSON(r, w, &req) {
+		return
+	}
+	if err := b.store.UpdateTask(req.TaskID, req.ChildID, req.Status, req.Result); err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	writeJSON(w, types.OKResponse{OK: true})
+}
+
+func (b *Broker) handleTaskWait(w http.ResponseWriter, r *http.Request) {
+	var req types.TaskWaitRequest
+	if !readJSON(r, w, &req) {
+		return
+	}
+	mode := req.Mode
+	if mode == "" {
+		mode = "all"
+	}
+	timeout := time.Duration(req.TimeoutSeconds) * time.Second
+	if timeout == 0 {
+		timeout = 300 * time.Second
+	}
+
+	results := b.store.WaitForTasks(req.TaskIDs, mode, timeout)
+
+	timedOut := false
+	for _, r := range results {
+		if r.Status == "pending" {
+			timedOut = true
+			break
+		}
+	}
+
+	writeJSON(w, types.TaskWaitResponse{Results: results, TimedOut: timedOut})
+}
+
+func (b *Broker) handleTaskList(w http.ResponseWriter, r *http.Request) {
+	var req types.TaskListRequest
+	if !readJSON(r, w, &req) {
+		return
+	}
+	tasks := b.store.ListTasks(req.ParentID, req.TaskIDs)
+	if tasks == nil {
+		tasks = []types.Task{}
+	}
+	writeJSON(w, types.TaskListResponse{Tasks: tasks})
+}
+
+func (b *Broker) handleTaskCancel(w http.ResponseWriter, r *http.Request) {
+	var req types.TaskCancelRequest
+	if !readJSON(r, w, &req) {
+		return
+	}
+	if err := b.store.CancelTask(req.TaskID); err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	writeJSON(w, types.OKResponse{OK: true})
 }
 
 // --- helpers ---
