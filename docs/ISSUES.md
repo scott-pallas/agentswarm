@@ -12,29 +12,27 @@ Tracked issues for future work. File:line references are relative to the repo ro
 
 3. **Discarded errors throughout** -- `json.Marshal` errors in broker SSE handler (`internal/broker/broker.go:103`, `internal/broker/broker.go:119`), `writeJSON` error in `internal/broker/broker.go:472`, heartbeat error in `internal/server/mcp.go:411`, send error in `internal/server/mcp.go:766` (`handleRequestTask`). All silently swallowed.
 
-4. **No HTTP server timeouts** -- `internal/server/mcp.go:359` creates `http.Server` with no `ReadTimeout`, `WriteTimeout`, or `IdleTimeout`. Slowloris-style DoS possible on the broker port.
+4. **Release workflow missing SHA256 checksums** -- `.github/workflows/release.yml` does not generate checksums for binaries. `install.sh` does not verify checksums. Supply chain concern.
 
-5. **Release workflow missing SHA256 checksums** -- `.github/workflows/release.yml` does not generate checksums for binaries. `install.sh` does not verify checksums. Supply chain concern.
+5. **StartCleaner goroutine has no stop mechanism** -- `internal/broker/broker.go:62-79` ticker goroutine runs forever with no context or done channel. Leaks in tests.
 
-6. **StartCleaner goroutine has no stop mechanism** -- `internal/broker/broker.go:62-79` ticker goroutine runs forever with no context or done channel. Leaks in tests.
+6. **Spawn log files never cleaned up** -- `internal/server/spawn.go:49-68` creates temp files in `/tmp` that accumulate forever. No reaper or TTL.
 
-7. **Spawn log files never cleaned up** -- `internal/server/spawn.go:49-68` creates temp files in `/tmp` that accumulate forever. No reaper or TTL.
+7. **Unbounded goroutine spawning in SSE client** -- `internal/server/stream.go:105` fires `go c.onEvent(...)` for every SSE data line with no semaphore or worker pool.
 
-8. **Unbounded goroutine spawning in SSE client** -- `internal/server/stream.go:105` fires `go c.onEvent(...)` for every SSE data line with no semaphore or worker pool.
+8. **lookupPeer fetches all peers to find one** -- `internal/server/mcp.go:886` calls `/list-peers` with machine scope and linearly scans. A dedicated `/peer/:id` endpoint would be O(1).
 
-9. **lookupPeer fetches all peers to find one** -- `internal/server/mcp.go:886` calls `/list-peers` with machine scope and linearly scans. A dedicated `/peer/:id` endpoint would be O(1).
+9. **SPEC.md MCP instructions missing rules 7-9** -- SPEC.md only documents rules 1-6 but the code has 9 rules including orchestration guidance (`delegate`, `wait_for_result`, `cancel_task`).
 
-10. **SPEC.md MCP instructions missing rules 7-9** -- SPEC.md only documents rules 1-6 but the code has 9 rules including orchestration guidance (`delegate`, `wait_for_result`, `cancel_task`).
+10. **wait_for_messages missing from SPEC.md tool-by-tool section** -- Only appears in the orchestration tools table, not documented individually with parameters.
 
-11. **wait_for_messages missing from SPEC.md tool-by-tool section** -- Only appears in the orchestration tools table, not documented individually with parameters.
+11. **SPEC.md check_messages description outdated** -- Does not mention it is now an alias for `wait_for_messages` with timeout 0.
 
-12. **SPEC.md check_messages description outdated** -- Does not mention it is now an alias for `wait_for_messages` with timeout 0.
+12. **README missing "verify it works" section** -- No smoke test instructions after install.
 
-13. **README missing "verify it works" section** -- No smoke test instructions after install.
+13. **SPEC.md file structure missing install.sh, .github/, .mcp.json** -- File tree in SPEC.md does not reflect the current repo layout.
 
-14. **SPEC.md file structure missing install.sh, .github/, .mcp.json** -- File tree in SPEC.md does not reflect the current repo layout.
-
-15. **Makefile install target needs sudo** -- `cp` to `/usr/local/bin/` fails without sudo on most systems. Should document or handle this.
+14. **Makefile install target needs sudo** -- `cp` to `/usr/local/bin/` fails without sudo on most systems. Should document or handle this.
 
 ---
 
