@@ -26,7 +26,7 @@ Agentswarm enables multiple Claude Code sessions to discover and message each ot
 
 #### `wait_for_messages`
 
-Blocks until one or more messages arrive for this peer. Replaces the current `check_messages` tool (which just returns a static string). This is the foundation that keeps interactive agents alive.
+Blocks until one or more messages arrive for this peer. The existing `check_messages` tool is kept as a backward-compatible alias that calls `wait_for_messages` with `timeout_seconds: 0` (non-blocking). This is the foundation that keeps interactive agents alive.
 
 Under the hood, the MCP server waits on a local channel fed by the SSE event stream. When a message arrives via SSE, it's forwarded to the channel, unblocking the tool call.
 
@@ -52,7 +52,7 @@ delegate(
 
 - Creates a task record in the broker (status: `pending`, child_id empty).
 - Spawns a new Claude Code agent with an augmented prompt that includes the `task_id` and instructions to call `report_result` when done.
-- The spawned agent's prompt also tells it to call `report_result` with the task_id on first connect, which the broker uses to link the agent's peer_id to the task (setting child_id and status `running`).
+- Task linking is implicit: when a worker calls `report_result` for a task that has no `child_id`, the broker sets `child_id` from the caller's peer ID. The task transitions directly from `pending` to its terminal status (`completed`/`failed`). There is no separate `running` state for delegated tasks — the agent either reports back or is detected as dead by the cleaner.
 
 #### `request_task`
 
@@ -85,6 +85,7 @@ report_result(
 - Updates the task record in the broker (status, result, completed_at).
 - Also sends the result as a `send_message` to the parent peer for SSE push.
 - Default status is `completed`.
+- Result string is capped at 64KB. If the worker needs to communicate more, it should write to a file and report the path.
 
 #### `wait_for_result`
 
@@ -105,6 +106,34 @@ wait_for_result(
 
 Under the hood, calls the broker's `/task/wait` long-poll endpoint.
 
+#### `list_tasks`
+
+Non-blocking query to check the status of delegated tasks. Unlike `wait_for_result`, this returns immediately with current state — useful for polling or progress checks.
+
+```
+list_tasks(
+  task_ids?: string[]
+) → { tasks: Task[] }
+```
+
+- If `task_ids` is omitted, returns all tasks where `parent_id` matches the calling peer.
+- Returns full task records including status, result (if completed), child peer_id, and timestamps.
+
+#### `cancel_task`
+
+Requests cancellation of a delegated task. Sends a cancellation message to the worker and marks the task as `cancelled` in the broker.
+
+```
+cancel_task(
+  task_id: string
+) → { ok: bool }
+```
+
+- Sets the task status to `cancelled` in the broker.
+- Sends a `send_message` to the worker peer with text indicating cancellation. The worker may or may not honor it (fire-and-forget agents will have already exited).
+- Unblocks any pending `wait_for_result` calls — the task appears with status `cancelled`.
+- Useful after `wait_for_result(mode: "any")` returns — cancel remaining tasks to free resources.
+
 ### Broker Changes
 
 #### Tasks Table (In-Memory)
@@ -117,7 +146,7 @@ New in-memory store alongside peers, messages, and context:
 | parent_id | string | Peer ID of the orchestrator |
 | child_id | string | Peer ID of the worker (set on spawn connect or immediately for request_task) |
 | prompt | string | Task description |
-| status | string | pending, running, completed, failed, timeout |
+| status | string | pending, completed, failed, cancelled |
 | result | string | Worker's reported result |
 | created_at | timestamp | Task creation time |
 | completed_at | timestamp | When result was reported |
@@ -158,7 +187,7 @@ Request:
 }
 ```
 
-Also used internally: when a spawned agent calls `report_result` for the first time, if the task has no `child_id`, the broker sets it from the caller's peer ID and transitions status to `running`. A subsequent call with a terminal status (`completed`/`failed`) finalizes the task. When the cleaner detects a dead peer with active tasks, it sets status to `failed`.
+When a worker calls `report_result`, if the task has no `child_id` yet, the broker sets it from the caller's peer ID before applying the status update. This is a single atomic operation — no two-phase handshake. When the cleaner detects a dead peer with active tasks, it sets status to `failed`.
 
 **`POST /task/wait`**
 
@@ -185,6 +214,42 @@ Response (when tasks complete or timeout):
 ```
 
 Implementation: broker holds a map of `task_id → []chan struct{}`. When a task update arrives, it closes the relevant channels, unblocking all waiters. Waiters use `select` with a timer for timeout.
+
+**`POST /task/list`**
+
+Returns tasks matching filter criteria. Called by `list_tasks`.
+
+Request:
+```json
+{
+  "parent_id": "abc123",
+  "task_ids": ["t_8f3a2b01"]
+}
+```
+
+Response:
+```json
+{
+  "tasks": [
+    {"task_id": "t_8f3a2b01", "parent_id": "abc123", "child_id": "def456", "status": "completed", "result": "...", "created_at": "...", "completed_at": "..."}
+  ]
+}
+```
+
+Either `parent_id` or `task_ids` can be used to filter. If both provided, `task_ids` takes precedence.
+
+**`POST /task/cancel`**
+
+Marks a task as cancelled. Called by `cancel_task`.
+
+Request:
+```json
+{
+  "task_id": "t_8f3a2b01"
+}
+```
+
+Sets task status to `cancelled`, unblocks any waiters, and returns `{ "ok": true }`. The MCP server is responsible for sending the cancellation message to the worker peer.
 
 #### Failure Detection
 
@@ -257,7 +322,7 @@ The orchestrator is a full Claude Code session. It can read the codebase, check 
 | `internal/types/types.go` | Add Task, TaskResult, and request/response types |
 | `internal/broker/store.go` | Add tasks map, CRUD operations, waiter channels |
 | `internal/broker/broker.go` | Add /task/create, /task/update, /task/wait routes; extend cleaner |
-| `internal/server/mcp.go` | Add 5 new tools; update check_messages → wait_for_messages; update instructions |
+| `internal/server/mcp.go` | Add 7 new tools (wait_for_messages, delegate, request_task, report_result, wait_for_result, list_tasks, cancel_task); keep check_messages as alias; update instructions |
 | `internal/server/spawn.go` | Extend buildSpawnPrompt for task_id; add delegate-specific spawn logic |
 | `README.md` | Full rewrite. Remove references to deleted binaries (agentswarm-broker, agentswarm CLI), fix install to single binary, replace SQLite with in-memory in architecture diagram, update MCP tools table (add set_name, whoami, spawn_agent + all orchestration tools), remove CLI section, fix env vars (remove AGENTSWARM_DB), add orchestration usage examples |
 | `SPEC.md` | Full rewrite. Fix language references (Go not TypeScript/Bun), remove SQLite references, fix file structure to match actual layout (single cmd/, store.go not db.go, no cli/), remove threading references, add spawn_agent and orchestration sections, update all endpoint documentation |
@@ -267,7 +332,7 @@ The orchestrator is a full Claude Code session. It can read the codebase, check 
 
 - Broker architecture (in-process, in-memory, single binary)
 - SSE transport
-- Existing tools (list_peers, send_message, broadcast, set_summary, set_name, whoami, get/set_context, spawn_agent)
+- Existing tools (list_peers, send_message, broadcast, set_summary, set_name, whoami, get/set_context, spawn_agent, check_messages as alias)
 - Peer registration and heartbeat
 - Dependencies (pure Go, no new packages)
 
@@ -290,7 +355,7 @@ Tap repo (`homebrew-tap`) with a formula that downloads the GitHub Release binar
 ```bash
 curl -fsSL https://raw.githubusercontent.com/scott-pallas/agentswarm/main/install.sh | sh
 ```
-Detects OS/arch, downloads the right binary from GitHub Releases, installs to `~/.local/bin` or `/usr/local/bin`.
+Detects OS/arch, downloads the right binary from GitHub Releases, installs to `~/.local/bin` (creates directory if needed, warns if not in PATH) or `/usr/local/bin` with sudo.
 
 ### Release Process (semi-automated)
 
@@ -318,4 +383,4 @@ Detects OS/arch, downloads the right binary from GitHub Releases, installs to `~
 
 ## Estimated Scope
 
-~400-500 lines of new Go code for orchestration. No new Go dependencies. Release infrastructure is GitHub Actions YAML + shell script, outside the Go codebase.
+~500-600 lines of new Go code for orchestration (7 tools + broker endpoints + store methods). No new Go dependencies. Release infrastructure is GitHub Actions YAML + shell script, outside the Go codebase.
