@@ -1,11 +1,11 @@
-# agentswarm — Technical Specification
+# agentswarm -- Technical Specification
 
 > Real-time peer-to-peer communication for Claude Code sessions.
 > Instant delivery, structured messaging, zero polling.
 
 **Author:** Scott Pallas
-**Version:** 0.1.0
-**Date:** 2026-03-30
+**Version:** 0.2.0
+**Date:** 2026-04-01
 **Language:** Go
 **Runtime:** Single binary (no runtime dependencies)
 **Protocol:** MCP (Model Context Protocol)
@@ -15,63 +15,64 @@
 
 ## Overview
 
-agentswarm enables multiple Claude Code sessions to discover each other and communicate in real-time on the same machine. It improves on existing solutions (claude-peers-mcp) by replacing HTTP polling with Server-Sent Events (SSE) for instant message delivery, adding structured message types, conversation threading, broadcast messaging, file conflict detection, and a shared key-value context store.
+agentswarm enables multiple Claude Code sessions to discover each other and communicate in real-time on the same machine. It replaces HTTP polling with Server-Sent Events (SSE) for instant message delivery, and provides structured message types, broadcast messaging, a shared key-value context store, agent spawning, and task-based orchestration.
 
 ### Design Principles
 
-1. **Instant, not polled** — SSE push for zero-latency message delivery
-2. **Typed, not raw** — structured messages with types, threading, and urgency
-3. **Zero external dependencies** — no OpenAI, no Redis, no Docker. Just Bun + SQLite + MCP SDK
-4. **Auto-everything** — broker auto-launches, dead peers auto-clean, summaries auto-set
-5. **One file does one thing** — clear separation, easy to understand and modify
+1. **Instant, not polled** -- SSE push for zero-latency message delivery
+2. **Typed, not raw** -- structured messages with types and urgency
+3. **Zero external dependencies** -- no Redis, no Docker. Just Go + MCP SDK
+4. **Auto-everything** -- broker auto-launches in-process, dead peers auto-clean
+5. **One file does one thing** -- clear separation, easy to understand and modify
 
 ---
 
 ## Architecture
 
 ```
-  ┌────────────────────────────────────────────────┐
-  │              BROKER (broker.ts)                  │
-  │              localhost:7900                      │
-  │                                                  │
-  │  ┌──────────┐  ┌──────────┐  ┌──────────────┐  │
-  │  │ SQLite   │  │ HTTP API │  │ SSE Streams  │  │
-  │  │          │  │ (REST)   │  │ (push to     │  │
-  │  │ • peers  │  │          │  │  each peer)  │  │
-  │  │ • msgs   │  │ register │  │              │  │
-  │  │ • context│  │ send     │  │ /stream/:id  │  │
-  │  │ • threads│  │ broadcast│  │              │  │
-  │  │          │  │ context  │  │ Keeps conn   │  │
-  │  │          │  │ etc.     │  │ open, pushes │  │
-  │  │          │  │          │  │ events       │  │
-  │  └──────────┘  └──────────┘  └──────────────┘  │
-  └──────┬─────────────────────────────┬────────────┘
-         │                             │
-    HTTP POST                    SSE (persistent)
-    (commands)                   (receive messages)
-         │                             │
-  ┌──────┴──────┐               ┌──────┴──────┐
-  │ MCP Server  │               │ MCP Server  │
-  │ (server.ts) │               │ (server.ts) │
-  │             │               │             │
-  │ stdio ↕     │               │ stdio ↕     │
-  │ Claude A    │               │ Claude B    │
-  └─────────────┘               └─────────────┘
+  +----------------------------------------------------+
+  |              IN-PROCESS BROKER                      |
+  |              localhost:7900                          |
+  |                                                     |
+  |  +------------+  +----------+  +--------------+     |
+  |  | In-Memory  |  | HTTP API |  | SSE Streams  |     |
+  |  | Store      |  | (REST)   |  | (push to     |     |
+  |  |            |  |          |  |  each peer)  |     |
+  |  | - peers    |  | register |  |              |     |
+  |  | - messages |  | send     |  | /stream/:id  |     |
+  |  | - tasks    |  | broadcast|  |              |     |
+  |  | - context  |  | task/*   |  | Keeps conn   |     |
+  |  |            |  | context  |  | open, pushes |     |
+  |  |            |  | etc.     |  | events       |     |
+  |  +------------+  +----------+  +--------------+     |
+  +------+------------------------------------+---------+
+         |                                    |
+    HTTP POST                           SSE (persistent)
+    (commands)                          (receive messages)
+         |                                    |
+  +------+------+                      +------+------+
+  | MCP Server  |                      | MCP Server  |
+  | (stdio)     |                      | (stdio)     |
+  |             |                      |             |
+  | Claude A    |                      | Claude B    |
+  +-------------+                      +-------------+
 ```
 
-### Key Difference from claude-peers
+The first MCP server instance to start binds port 7900 and runs the broker in-process. All subsequent instances connect to it as HTTP/SSE clients. There is no separate broker process.
+
+### SSE vs Polling
 
 ```
-claude-peers:
-  Server → POST /poll-messages → Broker → response (every 1 second)
-  Server → POST /poll-messages → Broker → response (every 1 second)
-  Server → POST /poll-messages → Broker → response (FOUND MESSAGE!)
+Polling approach (e.g. claude-peers-mcp):
+  Server -> POST /poll-messages -> Broker -> response (every 1 second)
+  Server -> POST /poll-messages -> Broker -> response (every 1 second)
+  Server -> POST /poll-messages -> Broker -> response (FOUND MESSAGE!)
   Latency: 0-999ms. Wasted requests: hundreds per minute.
 
 agentswarm:
-  Server ← SSE connection (persistent, open) ← Broker
+  Server <- SSE connection (persistent, open) <- Broker
   (message arrives at broker)
-  Broker ── push via SSE ──► Server (INSTANT)
+  Broker -- push via SSE --> Server (INSTANT)
   Latency: <10ms. Wasted requests: zero.
 ```
 
@@ -81,49 +82,40 @@ agentswarm:
 
 ```
 agentswarm/
-├── cmd/
-│   ├── broker/
-│   │   └── main.go          # Broker binary entry point
-│   └── server/
-│       └── main.go          # MCP server binary entry point
-├── internal/
-│   ├── broker/
-│   │   ├── broker.go        # HTTP routes + request handlers
-│   │   ├── db.go            # SQLite schema, queries, prepared statements
-│   │   └── sse.go           # SSE connection manager + push logic
-│   ├── server/
-│   │   ├── mcp.go           # MCP tool definitions + handlers
-│   │   ├── stream.go        # SSE client (connects to broker, receives events)
-│   │   └── context.go       # Git root/branch, CWD, TTY, active files detection
-│   └── types/
-│       └── types.go         # All shared types (Peer, Message, Thread, etc.)
-├── cli/
-│   └── main.go              # CLI utility (status, peers, send, broadcast, etc.)
-├── go.mod
-├── go.sum
-├── Makefile                  # build, install, test, clean
-├── CLAUDE.md                 # Instructions for Claude Code working on this repo
-├── SPEC.md                   # This file
-├── README.md                 # User-facing docs
-└── .mcp.json                 # MCP server configuration
++-- cmd/
+|   +-- agentswarm-server/
+|       +-- main.go              # Single binary entry point (MCP server + in-process broker)
++-- internal/
+|   +-- broker/
+|   |   +-- broker.go            # HTTP routes + request handlers
+|   |   +-- store.go             # In-memory store (peers, messages, tasks, context)
+|   |   +-- sse.go               # SSE connection manager + push logic
+|   +-- server/
+|   |   +-- mcp.go               # MCP tool definitions + handlers
+|   |   +-- stream.go            # SSE client (connects to broker, receives events)
+|   |   +-- context.go           # Git root/branch, CWD, TTY, active files detection
+|   |   +-- spawn.go             # Agent spawning + prompt building
+|   +-- types/
+|       +-- types.go             # All shared types (Peer, Message, Task, ContextEntry, etc.)
++-- go.mod
++-- go.sum
++-- Makefile                     # build, install, test, clean
++-- CLAUDE.md                    # Instructions for Claude Code working on this repo
++-- SPEC.md                      # This file
++-- .mcp.json                    # MCP server configuration
 ```
 
-### Binaries
+### Binary
 
 | Binary | Built from | What it does |
 |--------|-----------|-------------|
-| `agentswarm-broker` | `cmd/broker/main.go` | Singleton daemon — HTTP + SSE + SQLite |
-| `agentswarm-server` | `cmd/server/main.go` | MCP server — one per Claude Code session |
-| `agentswarm` | `cli/main.go` | CLI utility for debugging + management |
+| `agentswarm-server` | `cmd/agentswarm-server/main.go` | MCP server (stdio) + in-process broker (first instance only) |
 
 ### Build
 
 ```bash
 make build
-# Produces:
-#   bin/agentswarm-broker
-#   bin/agentswarm-server
-#   bin/agentswarm
+# Produces: bin/agentswarm-server
 
 make install
 # Copies to /usr/local/bin/
@@ -131,69 +123,79 @@ make install
 
 ---
 
-## Message Protocol
+## Data Types
 
-### Message Types
+### Peer
 
-```typescript
-type MessageType = 
-  | "message"      // General communication
-  | "question"     // Expects a response
-  | "response"     // Reply to a question
-  | "alert"        // Urgent — file conflict, error, etc.
-  | "notification" // FYI — status update, completion, etc.
-  | "request"      // Task delegation ("run these tests for me")
-  | "broadcast"    // Sent to multiple peers
-```
-
-### Message Schema
-
-```typescript
-interface PeerMessage {
-  id: number;                    // Auto-increment
-  type: MessageType;
-  from_id: string;               // Sender peer ID
-  to_id: string | null;          // Null for broadcasts
-  thread_id: string | null;      // Groups related messages
-  reply_to: number | null;       // References a specific message ID
-  text: string;                  // Message content
-  urgency: "low" | "normal" | "high";
-  context?: {
-    files?: string[];            // Relevant file paths
-    diff?: string;               // Code changes (optional)
-    metadata?: Record<string, unknown>; // Extensible
-  };
-  sent_at: string;               // ISO timestamp
-  delivered: boolean;
+```go
+type Peer struct {
+    ID           string   `json:"id"`            // 8-char random hex
+    Name         string   `json:"name"`           // Display name (optional)
+    PID          int      `json:"pid"`            // OS process ID
+    CWD          string   `json:"cwd"`            // Working directory
+    GitRoot      string   `json:"git_root"`       // Git repo root
+    GitBranch    string   `json:"git_branch"`     // Current branch
+    TTY          string   `json:"tty"`            // Terminal
+    Summary      string   `json:"summary"`        // What this peer is working on
+    ActiveFiles  []string `json:"active_files"`   // Files being edited (from git diff)
+    RegisteredAt string   `json:"registered_at"`  // ISO timestamp
+    LastSeen     string   `json:"last_seen"`      // ISO timestamp
 }
 ```
 
-### Peer Schema
+### Message
 
-```typescript
-interface Peer {
-  id: string;                    // 8-char random ID
-  pid: number;                   // OS process ID
-  cwd: string;                   // Working directory
-  git_root: string | null;       // Git repo root
-  git_branch: string | null;     // Current branch
-  tty: string | null;            // Terminal
-  summary: string;               // What this peer is working on
-  active_files: string[];        // Files currently being edited (from git diff)
-  registered_at: string;
-  last_seen: string;
+```go
+type MessageType string
+
+const (
+    TypeMessage      MessageType = "message"
+    TypeQuestion     MessageType = "question"
+    TypeResponse     MessageType = "response"
+    TypeAlert        MessageType = "alert"
+    TypeNotification MessageType = "notification"
+    TypeRequest      MessageType = "request"
+    TypeBroadcast    MessageType = "broadcast"
+)
+
+type Message struct {
+    ID        int64           `json:"id"`          // Auto-increment
+    Type      MessageType     `json:"type"`
+    FromID    string          `json:"from_id"`     // Sender peer ID
+    ToID      string          `json:"to_id"`       // Empty for broadcasts
+    Text      string          `json:"text"`        // Message content
+    Context   json.RawMessage `json:"context"`     // Optional structured context
+    Scope     string          `json:"scope"`       // For broadcasts: machine/directory/repo
+    SentAt    string          `json:"sent_at"`     // ISO timestamp
+    Delivered bool            `json:"delivered"`
 }
 ```
 
-### Thread Schema
+### Task
 
-```typescript
-interface Thread {
-  id: string;                    // UUID or short ID
-  topic: string;                 // Brief description
-  participants: string[];        // Peer IDs involved
-  created_at: string;
-  last_activity: string;
+```go
+type Task struct {
+    TaskID      string `json:"task_id"`       // Unique task ID
+    ParentID    string `json:"parent_id"`     // Peer that created the task
+    ChildID     string `json:"child_id"`      // Peer assigned to the task
+    Prompt      string `json:"prompt"`        // Task description
+    Status      string `json:"status"`        // pending, completed, failed, cancelled
+    Result      string `json:"result"`        // Result text (set on completion)
+    CreatedAt   string `json:"created_at"`    // ISO timestamp
+    CompletedAt string `json:"completed_at"`  // ISO timestamp
+}
+```
+
+### ContextEntry
+
+```go
+type ContextEntry struct {
+    Key        string `json:"key"`
+    ScopeType  string `json:"scope_type"`   // machine, directory, repo
+    ScopeValue string `json:"scope_value"`  // Actual path or "machine"
+    Value      string `json:"value"`
+    SetBy      string `json:"set_by"`       // Peer ID
+    UpdatedAt  string `json:"updated_at"`   // ISO timestamp
 }
 ```
 
@@ -201,427 +203,271 @@ interface Thread {
 
 ## Broker API
 
-### Core Endpoints (HTTP POST)
+All endpoints use JSON request/response bodies. The broker runs on `localhost:7900`.
 
-| Endpoint | Request Body | Response | Description |
-|----------|-------------|----------|-------------|
-| `POST /register` | `{ pid, cwd, git_root, git_branch, tty, summary, active_files }` | `{ id }` | Register new peer, get ID |
-| `POST /unregister` | `{ id }` | `{ ok }` | Remove peer |
-| `POST /heartbeat` | `{ id, active_files?, git_branch? }` | `{ ok }` | Keep-alive + update context |
-| `POST /set-summary` | `{ id, summary }` | `{ ok }` | Update peer summary |
-| `POST /list-peers` | `{ scope, cwd, git_root, exclude_id? }` | `Peer[]` | Discover peers |
-| `POST /send` | `{ from_id, to_id, type, text, thread_id?, reply_to?, urgency?, context? }` | `{ ok, message_id }` | Send message to one peer |
-| `POST /broadcast` | `{ from_id, scope, type, text, urgency?, context? }` | `{ ok, sent_to: string[] }` | Send to all peers in scope |
-| `POST /context/set` | `{ peer_id, key, value, scope? }` | `{ ok }` | Set shared context |
-| `POST /context/get` | `{ key, scope? }` | `{ value, set_by, updated_at }` | Get shared context |
-| `POST /context/list` | `{ scope? }` | `{ entries: ContextEntry[] }` | List all context keys |
+### Peer Management
 
-### SSE Stream Endpoint
+| Method | Endpoint | Request Body | Response | Description |
+|--------|----------|-------------|----------|-------------|
+| `POST` | `/register` | `{ pid, name?, cwd, git_root?, git_branch?, tty?, summary?, active_files? }` | `{ id }` | Register new peer, receive assigned ID |
+| `POST` | `/unregister` | `{ id }` | `{ ok }` | Remove peer |
+| `POST` | `/heartbeat` | `{ id, active_files?, git_branch? }` | `{ ok }` | Keep-alive + update context |
+| `POST` | `/set-summary` | `{ id, summary }` | `{ ok }` | Update peer summary |
+| `POST` | `/set-name` | `{ id, name }` | `{ ok }` | Update peer display name |
+| `POST` | `/list-peers` | `{ scope, cwd?, git_root?, exclude_id? }` | `Peer[]` | Discover peers (scope: machine, directory, repo) |
+
+### Messaging
+
+| Method | Endpoint | Request Body | Response | Description |
+|--------|----------|-------------|----------|-------------|
+| `POST` | `/send` | `{ from_id, to_id, type?, text, context? }` | `{ ok, message_id }` | Send message to one peer |
+| `POST` | `/broadcast` | `{ from_id, scope, type?, text, context?, cwd?, git_root? }` | `{ ok, sent_to }` | Send to all peers in scope |
+
+### Shared Context
+
+| Method | Endpoint | Request Body | Response | Description |
+|--------|----------|-------------|----------|-------------|
+| `POST` | `/context/set` | `{ peer_id, key, value, scope?, scope_value? }` | `{ ok }` | Set shared context value |
+| `POST` | `/context/get` | `{ key, scope?, scope_value? }` | `{ value, set_by, updated_at }` | Get shared context value |
+| `POST` | `/context/list` | `{ scope?, scope_value? }` | `{ entries: ContextEntry[] }` | List all context keys |
+
+### Task Orchestration
+
+| Method | Endpoint | Request Body | Response | Description |
+|--------|----------|-------------|----------|-------------|
+| `POST` | `/task/create` | `{ parent_id, child_id?, prompt }` | `{ task_id }` | Create a new task |
+| `POST` | `/task/update` | `{ task_id, child_id?, status, result? }` | `{ ok }` | Update task status/result |
+| `POST` | `/task/wait` | `{ task_ids, mode?, timeout_seconds? }` | `{ results, timed_out }` | Block until tasks complete (mode: "any" or "all") |
+| `POST` | `/task/list` | `{ parent_id?, task_ids? }` | `{ tasks }` | List tasks by parent or IDs |
+| `POST` | `/task/cancel` | `{ task_id }` | `{ ok }` | Cancel a task |
+
+### SSE Stream
 
 ```
-GET /stream/:peer_id
+GET /stream/{peer_id}
 ```
 
-Persistent Server-Sent Events connection. Broker pushes events as they happen:
+Persistent Server-Sent Events connection. The broker pushes events as they happen:
 
 ```
 event: message
-data: {"id":42,"type":"question","from_id":"abc123","text":"what files are you editing?","urgency":"normal","sent_at":"2026-03-30T21:00:00Z"}
+data: {"id":1,"type":"question","from_id":"abc12345","text":"what files are you editing?","sent_at":"2026-04-01T12:00:00Z"}
 
 event: broadcast
-data: {"id":43,"type":"alert","from_id":"def456","text":"I just refactored auth.ts - heads up","scope":"repo","sent_at":"2026-03-30T21:00:05Z"}
-
-event: conflict
-data: {"file":"src/auth.ts","peers":["abc123","def456"],"detected_at":"2026-03-30T21:00:10Z"}
+data: {"id":2,"type":"alert","from_id":"def67890","text":"refactored auth -- heads up","scope":"repo","sent_at":"2026-04-01T12:00:05Z"}
 
 event: context_updated
-data: {"key":"api_schema","set_by":"abc123","updated_at":"2026-03-30T21:00:15Z"}
+data: {"key":"api_schema","set_by":"abc12345","updated_at":"2026-04-01T12:00:10Z"}
 
 event: peer_joined
-data: {"id":"ghi789","cwd":"/Users/scott/myproject","summary":"Working on tests"}
+data: {"id":"ghi11111","cwd":"/Users/scott/myproject","summary":"Working on tests"}
 
 event: peer_left
-data: {"id":"xyz000","reason":"process_exited"}
+data: {"id":"xyz00000","reason":"process_exited"}
 ```
+
+On initial connection, any undelivered messages for the peer are flushed immediately. A keepalive comment (`: keepalive`) is sent every 15 seconds.
 
 ### Health Check
 
 ```
-GET /health → { status: "ok", peers: 5, uptime_seconds: 3600 }
+GET /health -> { status: "ok", service: "agentswarm", peers: 5, uptime_seconds: 3600 }
 ```
 
 ---
 
 ## MCP Tools
 
-### Tool: `list_peers`
+These are the tools exposed to Claude Code via the MCP stdio protocol.
 
-```typescript
-{
-  name: "list_peers",
-  description: "Discover other Claude Code instances. Shows what they're working on and what files they're editing.",
-  inputSchema: {
-    type: "object",
-    properties: {
-      scope: {
-        type: "string",
-        enum: ["machine", "directory", "repo"],
-        description: "Discovery scope"
-      }
-    },
-    required: ["scope"]
-  }
-}
+### list_peers
+
+Discover other Claude Code instances. Shows what they are working on and what files they are editing.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `scope` | string (enum: machine, directory, repo) | yes | Discovery scope |
+
+### send_message
+
+Send a message to another Claude Code instance. Arrives instantly via SSE.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `to_id` | string | yes | Target peer ID |
+| `text` | string | yes | Message content |
+| `type` | string (enum: message, question, request, alert, notification) | no | Message type (default: message) |
+| `files` | string[] | no | Relevant file paths for context |
+
+### broadcast
+
+Send a message to all peers in a scope.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `text` | string | yes | Message content |
+| `scope` | string (enum: machine, directory, repo) | yes | Broadcast scope |
+| `type` | string (enum: message, alert, notification) | no | Message type |
+
+### set_summary
+
+Describe what you are working on (visible to other peers).
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `summary` | string | yes | 1-2 sentence summary |
+
+### set_name
+
+Set a human-readable name for this peer.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `name` | string | yes | Display name |
+
+### whoami
+
+Returns your own peer ID, name, and registration info. No parameters.
+
+### get_context
+
+Read a shared context value set by any peer in the same scope.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `key` | string | yes | Context key to read |
+
+### set_context
+
+Set a shared context value visible to all peers in the same repo/directory.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `key` | string | yes | Context key |
+| `value` | string | yes | Context value (can be JSON stringified) |
+
+### check_messages
+
+Manually check for messages. Normally messages arrive automatically via SSE push -- this is a fallback. No parameters.
+
+### spawn_agent
+
+Launch a new Claude Code agent that joins the swarm. Returns immediately with the process PID.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `prompt` | string | yes | Task/instruction for the new agent |
+| `cwd` | string | no | Working directory (defaults to current peer's cwd) |
+| `name` | string | no | Display name for the spawned agent |
+| `mode` | string (enum: fire-and-forget, interactive) | no | fire-and-forget (default): agent runs task and exits. interactive: agent stays alive for multi-turn messaging. |
+
+The spawned agent runs as a detached `claude` subprocess with `--dangerously-skip-permissions --dangerously-load-development-channels`. Its prompt is augmented with swarm context (parent peer ID, mode instructions). In fire-and-forget mode, the agent is told to send results back to the parent via send_message. In interactive mode, it stays alive and responds to incoming channel messages.
+
+---
+
+## Orchestration
+
+Orchestration lets a parent agent delegate work to child agents and wait for results. This is built on top of spawn_agent and the task broker endpoints.
+
+### Workflow: delegate
+
+1. Parent calls `spawn_agent` to create a child agent with a prompt.
+2. Parent calls `/task/create` to register a task, associating it with the child.
+3. Child does its work, then calls `/task/update` to report completion (status: completed, result: ...).
+4. Parent calls `/task/wait` to block until the task finishes, then reads the result.
+
+### MCP Tools for Orchestration
+
+These tools wrap the task broker endpoints for use by Claude Code agents:
+
+| Tool | Description |
+|------|-------------|
+| `delegate` | Spawn a child agent and create a task for it. Combines spawn_agent + task/create. Returns the task ID. |
+| `request_task` | Create a task targeting an already-running peer (no spawn). |
+| `report_result` | Called by the child to report task completion or failure. |
+| `wait_for_result` | Block until one or more tasks complete. Supports "any" and "all" modes with optional timeout. |
+| `list_tasks` | List tasks by parent ID or specific task IDs. |
+| `cancel_task` | Cancel a pending task. |
+| `wait_for_messages` | Block until a message arrives (useful for interactive agents waiting for work). |
+
+### Task Lifecycle
+
 ```
-
-### Tool: `send_message`
-
-```typescript
-{
-  name: "send_message",
-  description: "Send a message to another Claude Code instance. Arrives instantly.",
-  inputSchema: {
-    type: "object",
-    properties: {
-      to_id: { type: "string", description: "Target peer ID" },
-      text: { type: "string", description: "Message content" },
-      type: { 
-        type: "string", 
-        enum: ["message", "question", "request", "alert", "notification"],
-        description: "Message type. Use 'question' when expecting a reply, 'alert' for urgent items, 'request' for task delegation."
-      },
-      urgency: {
-        type: "string",
-        enum: ["low", "normal", "high"],
-        description: "Message urgency. 'high' interrupts immediately."
-      },
-      thread_id: { type: "string", description: "Thread ID for ongoing conversations (optional)" },
-      files: { 
-        type: "array", 
-        items: { type: "string" },
-        description: "Relevant file paths for context (optional)" 
-      }
-    },
-    required: ["to_id", "text"]
-  }
-}
-```
-
-### Tool: `broadcast`
-
-```typescript
-{
-  name: "broadcast",
-  description: "Send a message to all peers in a scope (repo, directory, or machine).",
-  inputSchema: {
-    type: "object",
-    properties: {
-      text: { type: "string" },
-      scope: { type: "string", enum: ["machine", "directory", "repo"] },
-      type: { type: "string", enum: ["message", "alert", "notification"] },
-      urgency: { type: "string", enum: ["low", "normal", "high"] }
-    },
-    required: ["text", "scope"]
-  }
-}
-```
-
-### Tool: `set_summary`
-
-```typescript
-{
-  name: "set_summary",
-  description: "Describe what you're working on (visible to other peers).",
-  inputSchema: {
-    type: "object",
-    properties: {
-      summary: { type: "string", description: "1-2 sentence summary" }
-    },
-    required: ["summary"]
-  }
-}
-```
-
-### Tool: `get_context`
-
-```typescript
-{
-  name: "get_context",
-  description: "Read a shared context value set by any peer in the same scope. Use for API contracts, architectural decisions, shared state.",
-  inputSchema: {
-    type: "object",
-    properties: {
-      key: { type: "string", description: "Context key to read" }
-    },
-    required: ["key"]
-  }
-}
-```
-
-### Tool: `set_context`
-
-```typescript
-{
-  name: "set_context",
-  description: "Set a shared context value visible to all peers in the same repo/directory. Use for API contracts, decisions, shared state.",
-  inputSchema: {
-    type: "object",
-    properties: {
-      key: { type: "string", description: "Context key" },
-      value: { type: "string", description: "Context value (can be JSON stringified)" }
-    },
-    required: ["key", "value"]
-  }
-}
-```
-
-### Tool: `check_messages`
-
-```typescript
-{
-  name: "check_messages",
-  description: "Manually check for messages. Normally messages arrive automatically via push — use this as a fallback.",
-  inputSchema: {
-    type: "object",
-    properties: {}
-  }
-}
+  Parent                        Broker                       Child
+    |                             |                            |
+    |-- delegate (prompt) ------->|                            |
+    |<-- task_id -----------------| -- spawn_agent ----------->|
+    |                             |<--- register --------------|
+    |                             |<--- /task/update (child) --|
+    |                             |                            |
+    |                             |     (child does work)      |
+    |                             |                            |
+    |                             |<--- /task/update --------- |
+    |                             |     status: completed      |
+    |-- wait_for_result --------->|     result: "..."          |
+    |<-- results[] ---------------|                            |
 ```
 
 ---
 
-## SQLite Schema
+## SSE Implementation
 
-```sql
-PRAGMA journal_mode = WAL;
-PRAGMA busy_timeout = 3000;
+### Broker Side (sse.go)
 
-CREATE TABLE IF NOT EXISTS peers (
-  id TEXT PRIMARY KEY,
-  pid INTEGER NOT NULL,
-  cwd TEXT NOT NULL,
-  git_root TEXT,
-  git_branch TEXT,
-  tty TEXT,
-  summary TEXT NOT NULL DEFAULT '',
-  active_files TEXT NOT NULL DEFAULT '[]',  -- JSON array
-  registered_at TEXT NOT NULL,
-  last_seen TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS messages (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  type TEXT NOT NULL DEFAULT 'message',
-  from_id TEXT NOT NULL,
-  to_id TEXT,                                -- NULL for broadcasts
-  thread_id TEXT,
-  reply_to INTEGER,
-  text TEXT NOT NULL,
-  urgency TEXT NOT NULL DEFAULT 'normal',
-  context TEXT,                              -- JSON blob
-  scope TEXT,                                -- For broadcasts: machine/directory/repo
-  sent_at TEXT NOT NULL,
-  delivered INTEGER NOT NULL DEFAULT 0,
-  FOREIGN KEY (from_id) REFERENCES peers(id),
-  FOREIGN KEY (reply_to) REFERENCES messages(id)
-);
-
-CREATE TABLE IF NOT EXISTS context (
-  key TEXT NOT NULL,
-  scope_type TEXT NOT NULL DEFAULT 'repo',   -- machine/directory/repo
-  scope_value TEXT NOT NULL,                 -- the actual path/root
-  value TEXT NOT NULL,
-  set_by TEXT NOT NULL,
-  updated_at TEXT NOT NULL,
-  PRIMARY KEY (key, scope_type, scope_value),
-  FOREIGN KEY (set_by) REFERENCES peers(id)
-);
-
-CREATE INDEX IF NOT EXISTS idx_messages_to_id ON messages(to_id, delivered);
-CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(thread_id);
-CREATE INDEX IF NOT EXISTS idx_messages_scope ON messages(scope, delivered);
-CREATE INDEX IF NOT EXISTS idx_peers_git_root ON peers(git_root);
-CREATE INDEX IF NOT EXISTS idx_peers_cwd ON peers(cwd);
-```
-
----
-
-## SSE Implementation (Broker Side — Go)
+The SSEManager maintains a map of peer ID to buffered channel. Each SSE connection runs in its own goroutine.
 
 ```go
-// internal/broker/sse.go — the key architectural change
-
-// SSEManager manages persistent SSE connections for all peers
 type SSEManager struct {
     mu    sync.RWMutex
-    conns map[string]chan SSEEvent  // peerId → event channel
-}
-
-type SSEEvent struct {
-    Event string      // "message", "broadcast", "conflict", etc.
-    Data  interface{} // JSON-serializable payload
-}
-
-func NewSSEManager() *SSEManager {
-    return &SSEManager{conns: make(map[string]chan SSEEvent)}
-}
-
-// Subscribe — called when a peer connects to GET /stream/:id
-func (m *SSEManager) Subscribe(peerId string) chan SSEEvent {
-    m.mu.Lock()
-    defer m.mu.Unlock()
-    ch := make(chan SSEEvent, 64) // buffered to avoid blocking
-    m.conns[peerId] = ch
-    return ch
-}
-
-// Unsubscribe — called when SSE connection drops
-func (m *SSEManager) Unsubscribe(peerId string) {
-    m.mu.Lock()
-    defer m.mu.Unlock()
-    if ch, ok := m.conns[peerId]; ok {
-        close(ch)
-        delete(m.conns, peerId)
-    }
-}
-
-// Push — send an event to a specific peer (non-blocking)
-func (m *SSEManager) Push(peerId string, event SSEEvent) bool {
-    m.mu.RLock()
-    defer m.mu.RUnlock()
-    ch, ok := m.conns[peerId]
-    if !ok {
-        return false
-    }
-    select {
-    case ch <- event:
-        return true
-    default:
-        return false // channel full, peer is slow
-    }
-}
-
-// Broadcast — send to all peers matching a filter
-func (m *SSEManager) Broadcast(event SSEEvent, exclude string) []string {
-    m.mu.RLock()
-    defer m.mu.RUnlock()
-    var sent []string
-    for id, ch := range m.conns {
-        if id == exclude {
-            continue
-        }
-        select {
-        case ch <- event:
-            sent = append(sent, id)
-        default:
-            // skip slow peers
-        }
-    }
-    return sent
-}
-
-// HTTP handler for GET /stream/:id
-// Each connection gets its own goroutine
-func (b *Broker) handleSSEStream(w http.ResponseWriter, r *http.Request) {
-    peerId := r.PathValue("id") // Go 1.22+ path params
-    
-    flusher, ok := w.(http.Flusher)
-    if !ok {
-        http.Error(w, "SSE not supported", 500)
-        return
-    }
-    
-    w.Header().Set("Content-Type", "text/event-stream")
-    w.Header().Set("Cache-Control", "no-cache")
-    w.Header().Set("Connection", "keep-alive")
-    
-    ch := b.sse.Subscribe(peerId)
-    defer b.sse.Unsubscribe(peerId)
-    
-    // Send initial connection event
-    fmt.Fprintf(w, ": connected\n\n")
-    flusher.Flush()
-    
-    // Keepalive ticker
-    ticker := time.NewTicker(15 * time.Second)
-    defer ticker.Stop()
-    
-    for {
-        select {
-        case event, ok := <-ch:
-            if !ok {
-                return // channel closed
-            }
-            data, _ := json.Marshal(event.Data)
-            fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event.Event, data)
-            flusher.Flush()
-            
-        case <-ticker.C:
-            fmt.Fprintf(w, ": keepalive\n\n")
-            flusher.Flush()
-            
-        case <-r.Context().Done():
-            return // client disconnected
-        }
-    }
+    conns map[string]chan SSEEvent
 }
 ```
 
-**Why Go is perfect for this:** Each SSE connection runs in its own goroutine. 100 peers = 100 goroutines = ~200KB of memory. In Node/Bun, you'd be fighting the event loop. Go handles this natively.
+- `Subscribe(peerID)` -- creates a buffered channel (capacity 64) and registers it.
+- `Unsubscribe(peerID)` -- closes and removes the channel.
+- `Push(peerID, event)` -- non-blocking send to a specific peer. Returns false if peer is not connected or channel is full.
+- `Broadcast(event, exclude)` -- sends to all connected peers except the excluded one. Skips slow peers.
+
+### Client Side (stream.go)
+
+The SSEClient connects to `GET /stream/{peer_id}` and parses the event stream. On disconnect, it reconnects after a 2-second backoff. Events are dispatched to a callback that converts them into MCP channel notifications (`notifications/claude/channel`).
 
 ---
 
-## File Conflict Detection
+## In-Memory Store
 
-The broker can detect when two peers are editing the same file:
+The store (`internal/broker/store.go`) uses a `sync.RWMutex` to protect all data structures:
 
-```typescript
-// On heartbeat, peers report their active_files (from git diff --name-only)
-// Broker checks for overlaps:
+- `peers map[string]*Peer` -- registered peers keyed by ID
+- `messages []Message` -- append-only message log with delivery tracking
+- `context map[string]*ContextEntry` -- shared context keyed by composite key (scopeType + scopeValue + key)
+- `tasks` -- task records for orchestration (keyed by task ID)
 
-function detectConflicts(peerId: string, activeFiles: string[]) {
-  const peers = selectAllPeers.all() as Peer[];
-  
-  for (const other of peers) {
-    if (other.id === peerId) continue;
-    
-    const otherFiles = JSON.parse(other.active_files) as string[];
-    const overlap = activeFiles.filter(f => otherFiles.includes(f));
-    
-    if (overlap.length > 0) {
-      // Push conflict alert to BOTH peers
-      const alert = {
-        file: overlap,
-        peers: [peerId, other.id],
-        detected_at: new Date().toISOString(),
-      };
-      pushToPeer(peerId, "conflict", alert);
-      pushToPeer(other.id, "conflict", alert);
-    }
-  }
-}
-```
+Dead peer cleanup runs every 30 seconds. A peer is considered stale if its `last_seen` timestamp exceeds the timeout (60 seconds) and its OS process is no longer alive.
 
 ---
 
 ## MCP Server Startup Sequence
 
 ```
-1. Ensure broker is running (auto-launch if not)
-2. Detect CWD, git root, git branch, TTY
-3. Get active files (git diff --name-only)
-4. Register with broker → receive peer ID
-5. Open SSE connection to /stream/:peer_id
-6. Connect MCP over stdio
-7. Listen for SSE events → push as claude/channel notifications
-8. Start heartbeat timer (every 15s — update active_files, branch)
-9. Set instructions telling Claude to call set_summary on first turn
-10. On exit: unregister, close SSE connection
+1. Start MCP stdio server (immediately ready for tool calls)
+2. In background:
+   a. Check if broker is running on :7900 (GET /health)
+   b. If not, bind port 7900 and start broker in-process
+   c. If port is taken, wait for the other instance's broker to become healthy
+3. Detect CWD, git root, git branch, TTY, active files
+4. Register with broker (POST /register) -> receive peer ID
+5. Open SSE connection to GET /stream/{peer_id}
+6. Start heartbeat timer (every 15s -- update active_files, branch)
+7. SSE events -> convert to notifications/claude/channel for Claude Code
+8. On exit: unregister, close SSE, shut down in-process broker if running
 ```
 
 ---
 
-## MCP Instructions (System Prompt for Claude)
+## MCP Instructions (System Prompt)
+
+The MCP server sends these instructions to Claude Code:
 
 ```
 You are connected to agentswarm. Other Claude Code instances can see you and message you.
@@ -635,25 +481,9 @@ RULES:
 5. Use broadcast for announcements that affect everyone (refactors, breaking changes).
 6. Use appropriate message types:
    - "question" when you need a response
-   - "alert" for urgent conflicts or breaking changes  
+   - "alert" for urgent conflicts or breaking changes
    - "notification" for FYI status updates
    - "request" when delegating a task to another peer
-```
-
----
-
-## CLI Commands
-
-```bash
-bun cli.ts status              # Broker status + all peers
-bun cli.ts peers               # List all registered peers
-bun cli.ts send <id> <msg>     # Send message to a peer
-bun cli.ts broadcast <msg>     # Broadcast to all peers
-bun cli.ts context list        # Show all shared context
-bun cli.ts context get <key>   # Get a context value
-bun cli.ts context set <k> <v> # Set a context value
-bun cli.ts threads             # List active threads
-bun cli.ts kill-broker         # Stop broker daemon
 ```
 
 ---
@@ -663,104 +493,23 @@ bun cli.ts kill-broker         # Stop broker daemon
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `AGENTSWARM_PORT` | `7900` | Broker port |
-| `AGENTSWARM_DB` | `~/.agentswarm.db` | SQLite database path |
 | `AGENTSWARM_HEARTBEAT_MS` | `15000` | Heartbeat interval |
-| `AGENTSWARM_KEEPALIVE_MS` | `15000` | SSE keepalive interval |
-| `AGENTSWARM_STALE_TIMEOUT_MS` | `60000` | Remove peers not seen for this long |
 
 ---
 
-## Dependencies (go.mod)
+## Dependencies
 
 ```go
 module github.com/scott-pallas/agentswarm
 
 go 1.24
 
-require (
-    github.com/mark3labs/mcp-go v0.26.0    // MCP SDK for Go
-    modernc.org/sqlite v1.37.0              // Pure Go SQLite (no CGo)
-)
+require github.com/mark3labs/mcp-go v0.26.0
 ```
 
-**Two dependencies. No CGo. Cross-compiles cleanly.**
-
-If the Go MCP SDK has any gaps, fallback plan: implement MCP stdio JSON-RPC manually (~100 lines). The protocol is simple:
-- Read JSON-RPC from stdin
-- Write JSON-RPC to stdout  
-- Handle `tools/list` and `tools/call` methods
-- Send `notifications/claude/channel` for push messages
+One dependency. No CGo. Cross-compiles cleanly.
 
 ---
-
-## Requirements
-
-- Go 1.22+ (for building)
-- Nothing at runtime (single static binary)
-- Claude Code v2.1.80+ (channels support)
-- claude.ai login (channels require it — API key auth won't work)
-
----
-
-## Build Order (for implementation)
-
-1. `internal/types/types.go` — all shared types
-2. `internal/broker/db.go` — SQLite schema + prepared statements
-3. `internal/broker/sse.go` — SSE connection manager
-4. `internal/broker/broker.go` — HTTP routes + handlers + wire it all together
-5. `cmd/broker/main.go` — broker binary entry point
-6. `internal/server/context.go` — git/CWD/TTY/active files detection
-7. `internal/server/stream.go` — SSE client (connects to broker)
-8. `internal/server/mcp.go` — MCP tool definitions + handlers
-9. `cmd/server/main.go` — MCP server binary entry point
-10. `cli/main.go` — debugging utility
-11. `Makefile` — build, install, test, clean
-12. `CLAUDE.md` — instructions for Claude Code working on this repo
-13. `README.md` — user docs
-14. `.mcp.json` — MCP configuration
-15. Test: open 2 Claude Code sessions, have them talk
-
----
-
-## Success Criteria
-
-- [ ] Two Claude Code sessions can discover each other via `list_peers`
-- [ ] Messages arrive instantly via SSE (not polling)
-- [ ] Broadcasts reach all peers in a scope
-- [ ] Threads maintain conversation context
-- [ ] File conflict detection warns both peers
-- [ ] Shared context (get/set) works across peers
-- [ ] Broker auto-launches and auto-cleans dead peers
-- [ ] Clean shutdown on SIGINT/SIGTERM
-- [ ] Total codebase under 1000 lines
-- [ ] Single dependency (@modelcontextprotocol/sdk)
-- [ ] Works with Claude Code auto mode
-
----
-
-## Makefile
-
-```makefile
-.PHONY: build install test clean
-
-BINDIR := bin
-
-build:
-	go build -o $(BINDIR)/agentswarm-broker ./cmd/broker
-	go build -o $(BINDIR)/agentswarm-server ./cmd/server
-	go build -o $(BINDIR)/agentswarm ./cli
-
-install: build
-	cp $(BINDIR)/agentswarm-broker /usr/local/bin/
-	cp $(BINDIR)/agentswarm-server /usr/local/bin/
-	cp $(BINDIR)/agentswarm /usr/local/bin/
-
-test:
-	go test ./...
-
-clean:
-	rm -rf $(BINDIR)
-```
 
 ## MCP Configuration (.mcp.json)
 
@@ -780,4 +529,9 @@ claude mcp add --scope user --transport stdio agentswarm -- agentswarm-server
 
 ---
 
-*Spec written by SpicyIcyBot 🌶️❄️ for FrostByte to implement*
+## Requirements
+
+- Go 1.24 (for building)
+- Nothing at runtime (single static binary)
+- Claude Code with channels support
+- claude.ai login (channels require it -- API key auth does not work)
