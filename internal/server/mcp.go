@@ -181,13 +181,14 @@ func (s *MCPServer) registerTools() {
 
 	s.mcpSrv.AddTool(mcp.Tool{
 		Name:        "spawn_agent",
-		Description: "Launch a new Claude Code agent that joins the swarm. Fire-and-forget: returns immediately with the PID.",
+		Description: "Launch a new Claude Code agent that joins the swarm. Returns immediately with the PID.",
 		InputSchema: mcp.ToolInputSchema{
 			Type: "object",
 			Properties: map[string]interface{}{
 				"prompt": map[string]interface{}{"type": "string", "description": "The task/instruction for the new agent"},
 				"cwd":    map[string]interface{}{"type": "string", "description": "Working directory for the agent (defaults to current peer's cwd)"},
 				"name":   map[string]interface{}{"type": "string", "description": "Display name for the spawned agent"},
+				"mode":   map[string]interface{}{"type": "string", "enum": []string{"fire-and-forget", "interactive"}, "description": "fire-and-forget (default): agent runs the task and exits. interactive: agent stays alive for multi-turn message exchange."},
 			},
 			Required: []string{"prompt"},
 		},
@@ -548,21 +549,28 @@ func (s *MCPServer) handleSpawnAgent(ctx context.Context, req mcp.CallToolReques
 	prompt, _ := args["prompt"].(string)
 	cwd, _ := args["cwd"].(string)
 	name, _ := args["name"].(string)
+	mode, _ := args["mode"].(string)
 
 	if cwd == "" {
 		cwd = s.peerCtx.CWD
 	}
 
-	augmented := buildSpawnPrompt(prompt, s.peerID, name)
+	interactive := mode == "interactive"
+	augmented := buildSpawnPrompt(prompt, s.peerID, name, interactive)
 
-	pid, err := spawnClaude(augmented, cwd)
+	pid, logPath, err := spawnClaude(augmented, cwd, interactive)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 
+	modeLabel := "fire-and-forget"
+	if interactive {
+		modeLabel = "interactive"
+	}
+
 	return mcp.NewToolResultText(fmt.Sprintf(
-		"Agent spawned (pid: %d). It will appear in list_peers once it connects to the swarm.",
-		pid,
+		"Agent spawned (pid: %d, mode: %s). It will appear in list_peers once it connects to the swarm. Log: %s",
+		pid, modeLabel, logPath,
 	)), nil
 }
 

@@ -102,7 +102,7 @@ func (c *SSEClient) connect() error {
 		if strings.HasPrefix(line, "data: ") {
 			data := strings.TrimPrefix(line, "data: ")
 			if eventType != "" && c.onEvent != nil {
-				c.onEvent(eventType, data)
+				go c.onEvent(eventType, data)
 			}
 			continue
 		}

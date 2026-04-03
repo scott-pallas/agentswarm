@@ -16,18 +16,10 @@ const (
 	TypeBroadcast    MessageType = "broadcast"
 )
 
-// Urgency levels.
-type Urgency string
-
-const (
-	UrgencyLow    Urgency = "low"
-	UrgencyNormal Urgency = "normal"
-	UrgencyHigh   Urgency = "high"
-)
-
 // Peer represents a registered Claude Code session.
 type Peer struct {
 	ID           string   `json:"id"`
+	Name         string   `json:"name,omitempty"`
 	PID          int      `json:"pid"`
 	CWD          string   `json:"cwd"`
 	GitRoot      string   `json:"git_root,omitempty"`
@@ -45,10 +37,7 @@ type Message struct {
 	Type      MessageType     `json:"type"`
 	FromID    string          `json:"from_id"`
 	ToID      string          `json:"to_id,omitempty"`
-	ThreadID  string          `json:"thread_id,omitempty"`
-	ReplyTo   *int64          `json:"reply_to,omitempty"`
 	Text      string          `json:"text"`
-	Urgency   Urgency         `json:"urgency"`
 	Context   json.RawMessage `json:"context,omitempty"`
 	Scope     string          `json:"scope,omitempty"`
 	SentAt    string          `json:"sent_at"`
@@ -58,7 +47,6 @@ type Message struct {
 // MessageContext is the optional structured context attached to a message.
 type MessageContext struct {
 	Files    []string               `json:"files,omitempty"`
-	Diff     string                 `json:"diff,omitempty"`
 	Metadata map[string]interface{} `json:"metadata,omitempty"`
 }
 
@@ -70,13 +58,6 @@ type ContextEntry struct {
 	Value      string `json:"value"`
 	SetBy      string `json:"set_by"`
 	UpdatedAt  string `json:"updated_at"`
-}
-
-// ConflictAlert is pushed via SSE when two peers edit the same file.
-type ConflictAlert struct {
-	Files      []string `json:"files"`
-	Peers      []string `json:"peers"`
-	DetectedAt string   `json:"detected_at"`
 }
 
 // PeerJoined is the SSE event when a new peer registers.
@@ -95,6 +76,7 @@ type PeerLeft struct {
 // HealthResponse is returned by GET /health.
 type HealthResponse struct {
 	Status        string `json:"status"`
+	Service       string `json:"service"`
 	Peers         int    `json:"peers"`
 	UptimeSeconds int64  `json:"uptime_seconds"`
 }
@@ -103,6 +85,7 @@ type HealthResponse struct {
 
 type RegisterRequest struct {
 	PID         int      `json:"pid"`
+	Name        string   `json:"name,omitempty"`
 	CWD         string   `json:"cwd"`
 	GitRoot     string   `json:"git_root,omitempty"`
 	GitBranch   string   `json:"git_branch,omitempty"`
@@ -130,6 +113,11 @@ type SetSummaryRequest struct {
 	Summary string `json:"summary"`
 }
 
+type SetNameRequest struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
 type ListPeersRequest struct {
 	Scope     string `json:"scope"`
 	CWD       string `json:"cwd,omitempty"`
@@ -138,14 +126,11 @@ type ListPeersRequest struct {
 }
 
 type SendRequest struct {
-	FromID   string          `json:"from_id"`
-	ToID     string          `json:"to_id"`
-	Type     MessageType     `json:"type,omitempty"`
-	Text     string          `json:"text"`
-	ThreadID string          `json:"thread_id,omitempty"`
-	ReplyTo  *int64          `json:"reply_to,omitempty"`
-	Urgency  Urgency         `json:"urgency,omitempty"`
-	Context  json.RawMessage `json:"context,omitempty"`
+	FromID  string          `json:"from_id"`
+	ToID    string          `json:"to_id"`
+	Type    MessageType     `json:"type,omitempty"`
+	Text    string          `json:"text"`
+	Context json.RawMessage `json:"context,omitempty"`
 }
 
 type SendResponse struct {
@@ -158,7 +143,6 @@ type BroadcastRequest struct {
 	Scope   string          `json:"scope"`
 	Type    MessageType     `json:"type,omitempty"`
 	Text    string          `json:"text"`
-	Urgency Urgency         `json:"urgency,omitempty"`
 	Context json.RawMessage `json:"context,omitempty"`
 	CWD     string          `json:"cwd,omitempty"`
 	GitRoot string          `json:"git_root,omitempty"`

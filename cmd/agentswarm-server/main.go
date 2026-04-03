@@ -19,11 +19,6 @@ func main() {
 	port := envOrDefault("AGENTSWARM_PORT", "7900")
 	brokerURL := fmt.Sprintf("http://localhost:%s", port)
 
-	// Auto-launch broker if not running
-	if err := server.EnsureBroker(brokerURL); err != nil {
-		log.Fatalf("broker unavailable: %v", err)
-	}
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
