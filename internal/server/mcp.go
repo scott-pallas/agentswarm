@@ -26,12 +26,14 @@ type MCPServer struct {
 	mcpSrv     *mcpserver.MCPServer
 	sseClient  *SSEClient
 	httpServer *http.Server // non-nil if this instance is the broker
+	msgChan    chan string   // buffered channel for incoming messages from SSE
 }
 
 // NewMCPServer creates and configures the MCP server with all tools.
 func NewMCPServer(brokerURL string) *MCPServer {
 	s := &MCPServer{
 		brokerURL: brokerURL,
+		msgChan:   make(chan string, 64),
 	}
 
 	hooks := &mcpserver.Hooks{}
@@ -59,7 +61,10 @@ RULES:
    - "question" when you need a response
    - "alert" for urgent conflicts or breaking changes
    - "notification" for FYI status updates
-   - "request" when delegating a task to another peer`),
+   - "request" when delegating a task to another peer
+7. Use delegate to spawn tracked agents. Use wait_for_result to collect their output.
+8. When you receive a request with a task_id, call report_result with that task_id when you're done.
+9. Use cancel_task after wait_for_result(mode: "any") to clean up remaining agents.`),
 	)
 
 	s.registerTools()
@@ -171,13 +176,27 @@ func (s *MCPServer) registerTools() {
 	}, s.handleSetContext)
 
 	s.mcpSrv.AddTool(mcp.Tool{
+		Name:        "wait_for_messages",
+		Description: "Block until messages arrive for this peer. Use timeout_seconds: 0 for non-blocking check.",
+		InputSchema: mcp.ToolInputSchema{
+			Type: "object",
+			Properties: map[string]interface{}{
+				"timeout_seconds": map[string]interface{}{"type": "number", "description": "How long to wait. Default 120s. 0 = non-blocking."},
+			},
+		},
+	}, s.handleWaitForMessages)
+
+	s.mcpSrv.AddTool(mcp.Tool{
 		Name:        "check_messages",
-		Description: "Manually check for messages. Normally messages arrive automatically via push — use this as a fallback.",
+		Description: "Manually check for messages (backward-compatible alias for wait_for_messages with timeout 0).",
 		InputSchema: mcp.ToolInputSchema{
 			Type:       "object",
 			Properties: map[string]interface{}{},
 		},
-	}, s.handleCheckMessages)
+	}, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		req.Params.Arguments = map[string]interface{}{"timeout_seconds": float64(0)}
+		return s.handleWaitForMessages(ctx, req)
+	})
 
 	s.mcpSrv.AddTool(mcp.Tool{
 		Name:        "spawn_agent",
@@ -193,6 +212,84 @@ func (s *MCPServer) registerTools() {
 			Required: []string{"prompt"},
 		},
 	}, s.handleSpawnAgent)
+
+	s.mcpSrv.AddTool(mcp.Tool{
+		Name:        "delegate",
+		Description: "Spawn a new agent with a tracked task. Returns task_id immediately.",
+		InputSchema: mcp.ToolInputSchema{
+			Type: "object",
+			Properties: map[string]interface{}{
+				"prompt": map[string]interface{}{"type": "string", "description": "Task for the new agent"},
+				"name":   map[string]interface{}{"type": "string", "description": "Display name for the agent"},
+				"cwd":    map[string]interface{}{"type": "string", "description": "Working directory (defaults to current)"},
+			},
+			Required: []string{"prompt"},
+		},
+	}, s.handleDelegate)
+
+	s.mcpSrv.AddTool(mcp.Tool{
+		Name:        "request_task",
+		Description: "Assign a tracked task to an existing peer.",
+		InputSchema: mcp.ToolInputSchema{
+			Type: "object",
+			Properties: map[string]interface{}{
+				"peer_id": map[string]interface{}{"type": "string", "description": "Target peer ID"},
+				"prompt":  map[string]interface{}{"type": "string", "description": "Task description"},
+			},
+			Required: []string{"peer_id", "prompt"},
+		},
+	}, s.handleRequestTask)
+
+	s.mcpSrv.AddTool(mcp.Tool{
+		Name:        "report_result",
+		Description: "Report completion of a delegated task.",
+		InputSchema: mcp.ToolInputSchema{
+			Type: "object",
+			Properties: map[string]interface{}{
+				"task_id": map[string]interface{}{"type": "string", "description": "The task ID to report on"},
+				"result":  map[string]interface{}{"type": "string", "description": "Result summary"},
+				"status":  map[string]interface{}{"type": "string", "enum": []string{"completed", "failed"}, "description": "Task outcome (default: completed)"},
+			},
+			Required: []string{"task_id", "result"},
+		},
+	}, s.handleReportResult)
+
+	s.mcpSrv.AddTool(mcp.Tool{
+		Name:        "wait_for_result",
+		Description: "Block until delegated task(s) complete, fail, or timeout.",
+		InputSchema: mcp.ToolInputSchema{
+			Type: "object",
+			Properties: map[string]interface{}{
+				"task_id":         map[string]interface{}{"description": "Task ID or array of task IDs"},
+				"mode":            map[string]interface{}{"type": "string", "enum": []string{"any", "all"}, "description": "Wait mode (default: all)"},
+				"timeout_seconds": map[string]interface{}{"type": "number", "description": "Timeout in seconds (default: 300)"},
+			},
+			Required: []string{"task_id"},
+		},
+	}, s.handleWaitForResult)
+
+	s.mcpSrv.AddTool(mcp.Tool{
+		Name:        "list_tasks",
+		Description: "Check status of delegated tasks without blocking.",
+		InputSchema: mcp.ToolInputSchema{
+			Type: "object",
+			Properties: map[string]interface{}{
+				"task_ids": map[string]interface{}{"type": "array", "description": "Specific task IDs to check (omit for all your tasks)"},
+			},
+		},
+	}, s.handleListTasks)
+
+	s.mcpSrv.AddTool(mcp.Tool{
+		Name:        "cancel_task",
+		Description: "Cancel a delegated task and notify the worker.",
+		InputSchema: mcp.ToolInputSchema{
+			Type: "object",
+			Properties: map[string]interface{}{
+				"task_id": map[string]interface{}{"type": "string", "description": "Task ID to cancel"},
+			},
+			Required: []string{"task_id"},
+		},
+	}, s.handleCancelTask)
 }
 
 // Start launches the MCP stdio server immediately, then connects to the
@@ -374,6 +471,12 @@ func (s *MCPServer) handleSSEEvent(event, data string) {
 		params["meta"] = meta
 	}
 	s.mcpSrv.SendNotificationToAllClients("notifications/claude/channel", params)
+
+	// Feed into message channel for wait_for_messages
+	select {
+	case s.msgChan <- content:
+	default:
+	}
 }
 
 // --- Tool handlers ---
@@ -540,8 +643,51 @@ func (s *MCPServer) handleSetContext(ctx context.Context, req mcp.CallToolReques
 	return mcp.NewToolResultText(fmt.Sprintf("Context '%s' set", key)), nil
 }
 
-func (s *MCPServer) handleCheckMessages(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	return mcp.NewToolResultText("Messages are delivered automatically via SSE push. If you haven't received any, there are no pending messages."), nil
+func (s *MCPServer) handleWaitForMessages(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	timeoutSec := 120.0
+	if t, ok := req.Params.Arguments["timeout_seconds"].(float64); ok {
+		timeoutSec = t
+	}
+
+	if timeoutSec == 0 {
+		var messages []string
+		for {
+			select {
+			case msg := <-s.msgChan:
+				messages = append(messages, msg)
+			default:
+				result := map[string]interface{}{"messages": messages, "timed_out": false}
+				data, _ := json.MarshalIndent(result, "", "  ")
+				return mcp.NewToolResultText(string(data)), nil
+			}
+		}
+	}
+
+	timeout := time.Duration(timeoutSec * float64(time.Second))
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	var messages []string
+	select {
+	case msg := <-s.msgChan:
+		messages = append(messages, msg)
+	case <-timer.C:
+		result := map[string]interface{}{"messages": []string{}, "timed_out": true}
+		data, _ := json.MarshalIndent(result, "", "  ")
+		return mcp.NewToolResultText(string(data)), nil
+	}
+
+	// Drain additional messages
+	for {
+		select {
+		case msg := <-s.msgChan:
+			messages = append(messages, msg)
+		default:
+			result := map[string]interface{}{"messages": messages, "timed_out": false}
+			data, _ := json.MarshalIndent(result, "", "  ")
+			return mcp.NewToolResultText(string(data)), nil
+		}
+	}
 }
 
 func (s *MCPServer) handleSpawnAgent(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -556,7 +702,7 @@ func (s *MCPServer) handleSpawnAgent(ctx context.Context, req mcp.CallToolReques
 	}
 
 	interactive := mode == "interactive"
-	augmented := buildSpawnPrompt(prompt, s.peerID, name, interactive)
+	augmented := buildSpawnPrompt(prompt, s.peerID, name, interactive, "")
 
 	pid, logPath, err := spawnClaude(augmented, cwd, interactive)
 	if err != nil {
@@ -572,6 +718,167 @@ func (s *MCPServer) handleSpawnAgent(ctx context.Context, req mcp.CallToolReques
 		"Agent spawned (pid: %d, mode: %s). It will appear in list_peers once it connects to the swarm. Log: %s",
 		pid, modeLabel, logPath,
 	)), nil
+}
+
+func (s *MCPServer) handleDelegate(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	args := req.Params.Arguments
+	prompt, _ := args["prompt"].(string)
+	name, _ := args["name"].(string)
+	cwd, _ := args["cwd"].(string)
+	if cwd == "" {
+		cwd = s.peerCtx.CWD
+	}
+
+	var taskResp types.TaskCreateResponse
+	if err := s.brokerPost("/task/create", types.TaskCreateRequest{
+		ParentID: s.peerID,
+		Prompt:   prompt,
+	}, &taskResp); err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+
+	augmented := buildSpawnPrompt(prompt, s.peerID, name, false, taskResp.TaskID)
+	pid, logPath, err := spawnClaude(augmented, cwd, false)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+
+	return mcp.NewToolResultText(fmt.Sprintf(
+		`{"task_id": %q, "pid": %d, "log": %q}`,
+		taskResp.TaskID, pid, logPath,
+	)), nil
+}
+
+func (s *MCPServer) handleRequestTask(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	args := req.Params.Arguments
+	peerID, _ := args["peer_id"].(string)
+	prompt, _ := args["prompt"].(string)
+
+	var taskResp types.TaskCreateResponse
+	if err := s.brokerPost("/task/create", types.TaskCreateRequest{
+		ParentID: s.peerID,
+		ChildID:  peerID,
+		Prompt:   prompt,
+	}, &taskResp); err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+
+	s.brokerPost("/send", types.SendRequest{
+		FromID: s.peerID,
+		ToID:   peerID,
+		Type:   types.TypeRequest,
+		Text:   fmt.Sprintf("Task %s: %s", taskResp.TaskID, prompt),
+	}, nil)
+
+	return mcp.NewToolResultText(fmt.Sprintf(`{"task_id": %q}`, taskResp.TaskID)), nil
+}
+
+func (s *MCPServer) handleReportResult(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	args := req.Params.Arguments
+	taskID, _ := args["task_id"].(string)
+	result, _ := args["result"].(string)
+	status, _ := args["status"].(string)
+	if status == "" {
+		status = "completed"
+	}
+
+	if err := s.brokerPost("/task/update", types.TaskUpdateRequest{
+		TaskID:  taskID,
+		ChildID: s.peerID,
+		Status:  status,
+		Result:  result,
+	}, nil); err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+
+	return mcp.NewToolResultText(`{"ok": true}`), nil
+}
+
+func (s *MCPServer) handleWaitForResult(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	args := req.Params.Arguments
+
+	var taskIDs []string
+	switch v := args["task_id"].(type) {
+	case string:
+		taskIDs = []string{v}
+	case []interface{}:
+		for _, item := range v {
+			if s, ok := item.(string); ok {
+				taskIDs = append(taskIDs, s)
+			}
+		}
+	}
+
+	mode, _ := args["mode"].(string)
+	if mode == "" {
+		mode = "all"
+	}
+	timeoutSec := 300.0
+	if t, ok := args["timeout_seconds"].(float64); ok {
+		timeoutSec = t
+	}
+
+	var resp types.TaskWaitResponse
+	if err := s.brokerPost("/task/wait", types.TaskWaitRequest{
+		TaskIDs:        taskIDs,
+		Mode:           mode,
+		TimeoutSeconds: int(timeoutSec),
+	}, &resp); err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+
+	data, _ := json.MarshalIndent(resp, "", "  ")
+	return mcp.NewToolResultText(string(data)), nil
+}
+
+func (s *MCPServer) handleListTasks(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	args := req.Params.Arguments
+
+	var taskIDs []string
+	if ids, ok := args["task_ids"].([]interface{}); ok {
+		for _, item := range ids {
+			if id, ok := item.(string); ok {
+				taskIDs = append(taskIDs, id)
+			}
+		}
+	}
+
+	listReq := types.TaskListRequest{TaskIDs: taskIDs}
+	if len(taskIDs) == 0 {
+		listReq.ParentID = s.peerID
+	}
+
+	var resp types.TaskListResponse
+	if err := s.brokerPost("/task/list", listReq, &resp); err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+
+	data, _ := json.MarshalIndent(resp, "", "  ")
+	return mcp.NewToolResultText(string(data)), nil
+}
+
+func (s *MCPServer) handleCancelTask(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	taskID, _ := req.Params.Arguments["task_id"].(string)
+
+	if err := s.brokerPost("/task/cancel", types.TaskCancelRequest{
+		TaskID: taskID,
+	}, nil); err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+
+	// Best-effort: notify worker about cancellation
+	var listResp types.TaskListResponse
+	s.brokerPost("/task/list", types.TaskListRequest{TaskIDs: []string{taskID}}, &listResp)
+	if len(listResp.Tasks) > 0 && listResp.Tasks[0].ChildID != "" {
+		s.brokerPost("/send", types.SendRequest{
+			FromID: s.peerID,
+			ToID:   listResp.Tasks[0].ChildID,
+			Type:   types.TypeAlert,
+			Text:   fmt.Sprintf("Task %s has been cancelled. You may stop working on it.", taskID),
+		}, nil)
+	}
+
+	return mcp.NewToolResultText(`{"ok": true}`), nil
 }
 
 // --- HTTP helpers ---

@@ -8,16 +8,17 @@ import (
 )
 
 // buildSpawnPrompt wraps a user prompt with swarm context for a spawned agent.
-func buildSpawnPrompt(userPrompt, parentPeerID, name string, interactive bool) string {
+func buildSpawnPrompt(userPrompt, parentPeerID, name string, interactive bool, taskID string) string {
 	var prompt string
 	if name != "" {
 		prompt = fmt.Sprintf("On your first turn, call set_name(%q) to identify yourself in the swarm.\n\n", name)
 	}
-	prompt += fmt.Sprintf(
-		"You were spawned by agentswarm peer %s.",
-		parentPeerID,
-	)
-	if interactive {
+	prompt += fmt.Sprintf("You were spawned by agentswarm peer %s.", parentPeerID)
+	if taskID != "" {
+		prompt += fmt.Sprintf(" Your task ID is %s.", taskID)
+		prompt += "\n\nWhen you finish, call report_result(\"" + taskID + "\", \"your result summary\")."
+		prompt += "\nIf you encounter an error you cannot resolve, call report_result(\"" + taskID + "\", \"description of failure\", \"failed\")."
+	} else if interactive {
 		prompt += " You are in INTERACTIVE mode — you must stay alive and respond to all incoming messages. Do NOT exit or stop. When you receive a channel message, respond immediately using send_message."
 	} else {
 		prompt += " When you finish your task, send your results back to that peer using send_message."
