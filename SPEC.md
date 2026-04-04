@@ -102,7 +102,12 @@ agentswarm/
 +-- Makefile                     # build, install, test, clean
 +-- CLAUDE.md                    # Instructions for Claude Code working on this repo
 +-- SPEC.md                      # This file
-+-- .mcp.json                    # MCP server configuration
++-- install.sh                   # Shell installer (downloads from GitHub Releases)
++-- .mcp.json                    # MCP server configuration for Claude Code
++-- .github/
+|   +-- workflows/
+|       +-- ci.yml               # CI: build + test on push/PR
+|       +-- release.yml          # Release: cross-compile on tag push
 ```
 
 ### Binary
@@ -348,7 +353,15 @@ Set a shared context value visible to all peers in the same repo/directory.
 
 ### check_messages
 
-Manually check for messages. Normally messages arrive automatically via SSE push -- this is a fallback. No parameters.
+Backward-compatible alias for `wait_for_messages` with timeout 0. Returns immediately with any pending messages. No parameters.
+
+### wait_for_messages
+
+Block until messages arrive for this peer. Useful for interactive agents that need to stay alive waiting for work.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `timeout_seconds` | number | no | How long to wait (default: 120s, 0 = non-blocking check) |
 
 ### spawn_agent
 
@@ -484,6 +497,9 @@ RULES:
    - "alert" for urgent conflicts or breaking changes
    - "notification" for FYI status updates
    - "request" when delegating a task to another peer
+7. Use delegate to spawn tracked agents. Use wait_for_result to collect their output.
+8. When you receive a request with a task_id, call report_result with that task_id when you're done.
+9. Use cancel_task after wait_for_result(mode: "any") to clean up remaining agents.
 ```
 
 ---
@@ -515,9 +531,11 @@ One dependency. No CGo. Cross-compiles cleanly.
 
 ```json
 {
-  "agentswarm": {
-    "command": "agentswarm-server",
-    "args": []
+  "mcpServers": {
+    "agentswarm": {
+      "type": "stdio",
+      "command": "agentswarm-server"
+    }
   }
 }
 ```
