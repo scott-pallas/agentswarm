@@ -53,9 +53,19 @@ claude mcp add --scope user --transport stdio agentswarm -- agentswarm-server
 
 The broker starts automatically when the first MCP server connects. No separate daemon required.
 
+### Enable real-time push
+
+To receive instant message notifications inline (the `<channel source="agentswarm">` messages), launch Claude Code with development channels enabled:
+
+```bash
+claude --dangerously-load-development-channels server:agentswarm
+```
+
+Without this flag, MCP tools still work but messages will only be accessible via `check_messages` or `wait_for_messages` -- you won't get the real-time push notifications that make the swarm feel instant.
+
 ## Verify It Works
 
-Open two Claude Code sessions. In each one, run:
+Open two Claude Code sessions (with the flag above). In each one, run:
 
 ```
 list_peers with scope "machine"
