@@ -116,7 +116,11 @@ func (b *Broker) handleSSEStream(w http.ResponseWriter, r *http.Request) {
 
 	// Deliver any undelivered messages
 	for _, m := range b.store.UndeliveredMessages(peerID) {
-		data, _ := json.Marshal(m)
+		data, err := json.Marshal(m)
+		if err != nil {
+			log.Printf("failed to marshal undelivered message %d: %v", m.ID, err)
+			continue
+		}
 		fmt.Fprintf(w, "event: message\ndata: %s\n\n", data)
 		flusher.Flush()
 		b.store.MarkDelivered(m.ID)
@@ -132,7 +136,11 @@ func (b *Broker) handleSSEStream(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				return
 			}
-			data, _ := json.Marshal(event.Data)
+			data, err := json.Marshal(event.Data)
+			if err != nil {
+				log.Printf("failed to marshal SSE event %s: %v", event.Event, err)
+				continue
+			}
 			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event.Event, data)
 			flusher.Flush()
 
@@ -490,5 +498,7 @@ func readJSON(r *http.Request, w http.ResponseWriter, v interface{}) bool {
 
 func writeJSON(w http.ResponseWriter, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(v)
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		log.Printf("failed to write JSON response: %v", err)
+	}
 }

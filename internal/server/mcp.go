@@ -424,11 +424,13 @@ func (s *MCPServer) heartbeatLoop(ctx context.Context) {
 			return
 		case <-ticker.C:
 			s.peerCtx.RefreshActiveFiles()
-			s.brokerPost("/heartbeat", types.HeartbeatRequest{
+			if err := s.brokerPost("/heartbeat", types.HeartbeatRequest{
 				ID:          s.peerID,
 				ActiveFiles: s.peerCtx.ActiveFiles,
 				GitBranch:   s.peerCtx.GitBranch,
-			}, nil)
+			}, nil); err != nil {
+				log.Printf("heartbeat failed: %v", err)
+			}
 		}
 	}
 }
@@ -779,12 +781,14 @@ func (s *MCPServer) handleRequestTask(ctx context.Context, req mcp.CallToolReque
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 
-	s.brokerPost("/send", types.SendRequest{
+	if err := s.brokerPost("/send", types.SendRequest{
 		FromID: s.peerID,
 		ToID:   peerID,
 		Type:   types.TypeRequest,
 		Text:   fmt.Sprintf("Task %s: %s", taskResp.TaskID, prompt),
-	}, nil)
+	}, nil); err != nil {
+		log.Printf("failed to send task request to peer %s: %v", peerID, err)
+	}
 
 	return mcp.NewToolResultText(fmt.Sprintf(`{"task_id": %q}`, taskResp.TaskID)), nil
 }
