@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/scott-pallas/agentswarm/internal/types"
@@ -223,7 +224,7 @@ func (s *Store) ListContext(scopeType, scopeValue string) []types.ContextEntry {
 }
 
 func isProcessAlive(proc *os.Process) bool {
-	err := proc.Signal(os.Signal(nil))
+	err := proc.Signal(syscall.Signal(0))
 	return err == nil
 }
 
