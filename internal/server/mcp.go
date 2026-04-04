@@ -416,7 +416,7 @@ func (s *MCPServer) register() error {
 }
 
 func (s *MCPServer) heartbeatLoop(ctx context.Context) {
-	intervalMs, _ := strconv.Atoi(envOrDefault("AGENTSWARM_HEARTBEAT_MS", "15000"))
+	intervalMs, _ := strconv.Atoi(EnvOrDefault("AGENTSWARM_HEARTBEAT_MS", "15000"))
 	ticker := time.NewTicker(time.Duration(intervalMs) * time.Millisecond)
 	defer ticker.Stop()
 
@@ -945,7 +945,9 @@ func (s *MCPServer) brokerPost(path string, body interface{}, result interface{}
 	return nil
 }
 
-func envOrDefault(key, def string) string {
+// EnvOrDefault returns the value of the environment variable named by key,
+// or def if the variable is not set or empty.
+func EnvOrDefault(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
 	}

@@ -16,7 +16,7 @@ func main() {
 	// Ensure all logging goes to stderr (stdout is the MCP channel)
 	log.SetOutput(os.Stderr)
 
-	port := envOrDefault("AGENTSWARM_PORT", "7900")
+	port := server.EnvOrDefault("AGENTSWARM_PORT", "7900")
 	brokerURL := fmt.Sprintf("http://localhost:%s", port)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -40,9 +40,3 @@ func main() {
 	}
 }
 
-func envOrDefault(key, def string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return def
-}
