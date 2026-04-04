@@ -44,6 +44,16 @@ claude mcp add --scope user --transport stdio agentswarm -- agentswarm-server
 
 The broker starts automatically when the first MCP server connects. No separate daemon required.
 
+## Verify It Works
+
+Open two Claude Code sessions. In each one, run:
+
+```
+list_peers with scope "machine"
+```
+
+Each session should see the other. If you see an empty list, check that `agentswarm-server` is in your `$PATH` and the MCP server loaded (look for "agentswarm" in `/tools`).
+
 ## Architecture
 
 ```
