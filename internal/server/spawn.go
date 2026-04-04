@@ -63,6 +63,7 @@ func spawnClaude(prompt, cwd string, interactive bool) (int, string, error) {
 	go func() {
 		cmd.Wait()
 		logFile.Close()
+		os.Remove(logPath)
 	}()
 
 	return cmd.Process.Pid, logPath, nil
