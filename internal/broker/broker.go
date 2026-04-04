@@ -17,6 +17,7 @@ type Broker struct {
 	store     *Store
 	sse       *SSEManager
 	startedAt time.Time
+	done      chan struct{}
 }
 
 // New creates a new Broker with in-memory storage.
@@ -25,6 +26,7 @@ func New() *Broker {
 		store:     NewStore(),
 		sse:       NewSSEManager(),
 		startedAt: time.Now(),
+		done:      make(chan struct{}),
 	}
 }
 
@@ -63,19 +65,33 @@ func (b *Broker) StartCleaner(interval, staleTimeout time.Duration) {
 	go func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
-		for range ticker.C {
-			stale := b.store.CleanStalePeers(staleTimeout)
-			for _, id := range stale {
-				b.sse.Unsubscribe(id)
-				b.store.FailTasksForPeer(id)
-				b.sse.Broadcast(SSEEvent{
-					Event: "peer_left",
-					Data:  types.PeerLeft{ID: id, Reason: "process_exited"},
-				}, "")
-				log.Printf("cleaned stale peer: %s", id)
+		for {
+			select {
+			case <-b.done:
+				return
+			case <-ticker.C:
+				stale := b.store.CleanStalePeers(staleTimeout)
+				for _, id := range stale {
+					b.sse.Unsubscribe(id)
+					b.store.FailTasksForPeer(id)
+					b.sse.Broadcast(SSEEvent{
+						Event: "peer_left",
+						Data:  types.PeerLeft{ID: id, Reason: "process_exited"},
+					}, "")
+					log.Printf("cleaned stale peer: %s", id)
+				}
 			}
 		}
 	}()
+}
+
+// StopCleaner stops the background cleaner goroutine.
+func (b *Broker) StopCleaner() {
+	select {
+	case <-b.done:
+	default:
+		close(b.done)
+	}
 }
 
 // --- SSE handler ---
