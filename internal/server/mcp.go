@@ -695,6 +695,10 @@ func (s *MCPServer) handleWaitForMessages(ctx context.Context, req mcp.CallToolR
 		result := map[string]interface{}{"messages": []string{}, "timed_out": true}
 		data, _ := json.MarshalIndent(result, "", "  ")
 		return mcp.NewToolResultText(string(data)), nil
+	case <-ctx.Done():
+		result := map[string]interface{}{"messages": []string{}, "timed_out": true, "cancelled": true}
+		data, _ := json.MarshalIndent(result, "", "  ")
+		return mcp.NewToolResultText(string(data)), nil
 	}
 
 	// Drain additional messages
