@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"time"
@@ -335,11 +336,21 @@ func (s *MCPServer) ensureBroker() error {
 
 	log.Println("no broker found, starting in-process...")
 
+	u, err := url.Parse(s.brokerURL)
+	if err != nil {
+		return fmt.Errorf("invalid broker URL: %w", err)
+	}
+	host := u.Host
+	_, port, _ := net.SplitHostPort(host)
+	if port == "" {
+		port = "7900"
+	}
+
 	// Try to bind the port — if it fails, another instance beat us to it
-	ln, err := net.Listen("tcp", "127.0.0.1:7900")
+	ln, err := net.Listen("tcp", "127.0.0.1:"+port)
 	if err != nil {
 		// Port taken — another instance just became the broker, wait for it
-		log.Printf("port 7900 taken, connecting as client...")
+		log.Printf("port %s taken, connecting as client...", port)
 		for i := 0; i < 20; i++ {
 			time.Sleep(250 * time.Millisecond)
 			resp, err := http.Get(s.brokerURL + "/health")
@@ -368,7 +379,7 @@ func (s *MCPServer) ensureBroker() error {
 		}
 	}()
 
-	log.Println("in-process broker started on :7900")
+	log.Printf("in-process broker started on :%s", port)
 	return nil
 }
 
