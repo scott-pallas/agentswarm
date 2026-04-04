@@ -427,6 +427,8 @@ func (s *Store) notifyWaiters(taskID string) {
 
 func generateStoreID() string {
 	b := make([]byte, 4)
-	rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		panic("crypto/rand failed: " + err.Error())
+	}
 	return hex.EncodeToString(b)
 }
