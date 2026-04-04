@@ -31,6 +31,7 @@ make clean    # Remove bin/
 | `internal/server/stream.go` | SSE client |
 | `internal/server/mcp.go` | MCP tools + handlers |
 | `internal/server/spawn.go` | Agent spawning + prompt building |
+| `cmd/agentswarm-server/main.go` | Entry point, signal handling, broker URL setup |
 
 ## Dependencies
 
