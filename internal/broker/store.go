@@ -259,6 +259,13 @@ func (s *Store) GetTask(id string) (*types.Task, bool) {
 }
 
 func (s *Store) UpdateTask(id, childID, status, result string) error {
+	validStatuses := map[string]bool{
+		"pending": true, "completed": true, "failed": true, "cancelled": true,
+	}
+	if !validStatuses[status] {
+		return fmt.Errorf("invalid task status: %q", status)
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	t, ok := s.tasks[id]
