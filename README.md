@@ -27,6 +27,14 @@ go install github.com/scott-pallas/agentswarm/cmd/agentswarm-server@latest
 
 Binary lands in `~/go/bin/`. Make sure that directory is in your `$PATH`.
 
+### Shell installer
+
+```bash
+curl -sfL https://raw.githubusercontent.com/scott-pallas/agentswarm/main/install.sh | sh
+```
+
+Downloads the latest release binary to `~/.local/bin/`.
+
 ### From source
 
 ```bash
