@@ -27,14 +27,16 @@ type MCPServer struct {
 	mcpSrv     *mcpserver.MCPServer
 	sseClient  *SSEClient
 	httpServer *http.Server // non-nil if this instance is the broker
-	msgChan    chan string   // buffered channel for incoming messages from SSE
+	httpClient *http.Client
+	msgChan    chan string // buffered channel for incoming messages from SSE
 }
 
 // NewMCPServer creates and configures the MCP server with all tools.
 func NewMCPServer(brokerURL string) *MCPServer {
 	s := &MCPServer{
-		brokerURL: brokerURL,
-		msgChan:   make(chan string, 64),
+		brokerURL:  brokerURL,
+		httpClient: &http.Client{Timeout: 10 * time.Second},
+		msgChan:    make(chan string, 64),
 	}
 
 	hooks := &mcpserver.Hooks{}
@@ -923,7 +925,7 @@ func (s *MCPServer) brokerPost(path string, body interface{}, result interface{}
 		return err
 	}
 
-	resp, err := http.Post(s.brokerURL+path, "application/json", bytes.NewReader(data))
+	resp, err := s.httpClient.Post(s.brokerURL+path, "application/json", bytes.NewReader(data))
 	if err != nil {
 		return err
 	}
