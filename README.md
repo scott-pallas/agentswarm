@@ -14,8 +14,9 @@ Real-time peer discovery and communication for multiple Claude Code sessions on 
 
 ## Requirements
 
-- **Go 1.24+** -- [install Go](https://go.dev/dl/)
+- **Go 1.24+** -- [install Go](https://go.dev/dl/) (only needed if building from source)
 - **Claude Code v2.1.80+** -- channels support required
+- **claude.ai login** -- channels require a claude.ai account (API key auth alone does not work)
 
 ## Install
 
